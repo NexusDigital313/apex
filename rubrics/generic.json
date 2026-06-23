@@ -1,0 +1,336 @@
+{
+  "domain": "generic",
+  "target_standard": "Hardened, observable, idempotent, safely-concurrent automation: bash scripts pass shellcheck clean under strict mode with trapped error/cleanup, full CLI ergonomics, structured logging, dependency preflight, single-instance locking, and disciplined exit codes; Python scripts use argparse + logging + type hints + pathlib + list-form subprocess + context managers + narrow exception handling + explicit exit codes. This is the fallback \"make any ordinary script production-grade\" domain.",
+  "summary": "A 28-control rubric that elevates any ordinary automation script to production engineering standard. Bash controls enforce strict mode (set -euo pipefail + safe IFS), ERR/EXIT traps with line numbers and cleanup, shellcheck-clean strict quoting, getopts/long-flag parsing with --help/--version/--dry-run/--verbose, leveled+timestamped structured logging to stderr, dependency preflight, portable single-instance locking, mktemp tempdirs with trap cleanup, idempotency, optional root guard, network retry with exponential backoff, exit-code discipline, signal handling, and bans on eval of untrusted input and unsafe here-docs. Python controls require argparse, logging config, the __main__ guard, narrow exception handling mapped to sys.exit codes, type hints, pathlib, list-form subprocess (never shell=True), context managers, dataclasses, no bare except, and retry/backoff. Portability is baked in: macOS has no flock(1) binary and ships old bash, so locking uses a portable mkdir/noclobber mutex and snippets target bash 3.2+ where noted. Deterministic transforms supply ready-to-paste strict-mode headers, trap+logging scaffolding, getopts long-flag parsers, portable lockfile guards, mktemp cleanup blocks, retry helpers, and a Python skeleton. Most controls are statically checkable (shellcheck, grep, ruff/mypy/AST) and therefore automatable; a handful (idempotency, retry semantics, secret handling) need human or runtime judgment.",
+  "llm_guidance": "When hardening an arbitrary script toward this standard, work in vertical slices and verify, do not just paste. Order of operations for BASH: (1) add the strict-mode header (DT-BASH-STRICT-HEADER); (2) add the log/trap scaffold (DT-BASH-LOG-TRAP-SCAFFOLD) so failures become visible immediately; (3) add the arg-parse skeleton and wire --dry-run/--verbose/--version/--help; (4) add preflight require() + optional root guard; (5) add the portable lock and mktemp scratch dir; (6) route every side-effecting command through run() and wrap network calls in retry() with explicit timeouts; (7) replace every diagnostic echo with log; (8) audit quoting and eliminate eval/unquoted here-docs; (9) run `shellcheck -x` and fix to zero findings, then `shfmt -d`. For PYTHON: start from DT-PYTHON-PRODUCTION-SKELETON or graft its parts; ensure argparse + __main__ guard, logging not print, list-form subprocess with check=True+timeout (never shell=True with interpolated input), narrow excepts mapped to sys.exit codes (no bare except), type hints, pathlib, context managers; then run `ruff check` and `mypy --strict`.\\n\\nCRITICAL PORTABILITY NOTES (this environment is macOS): flock(1) does NOT exist on macOS \u2014 never emit it as the locking primitive; use the mkdir mutex (DT-BASH-LOCKFILE-PORTABLE). The system /bin/bash is 3.2 (no associative arrays, no mapfile, no ${var,,} lowercase) \u2014 either target bash 3.2 constructs or require bash>=4 via a version guard in preflight and document it; the user has homebrew bash 5.3 available. mktemp flags differ between BSD/macOS and GNU \u2014 the `mktemp -d \\\"<dir>/<prefix>.XXXXXX\\\"` form used in the transforms works on both. `date -u +%Y-%m-%dT%H:%M:%SZ` is portable; avoid GNU-only `date` flags. Always use `printf` over `echo -e`/`echo -n` for portability.\\n\\nJUDGEMENT: preserve the script's existing conventions and behavior \u2014 do not change its stdout contract (logs go to stderr so stdout stays clean for real output). Make cleanup idempotent because it runs on partial-setup failures. Reserve exit 0 strictly for full success. Do not over-engineer trivial throwaway scripts with locks/syslog, but ALWAYS apply strict mode, quoting, traps, and no-eval/no-shell=True regardless of size \u2014 those are non-negotiable. Several controls (idempotency, env validation specifics, secret handling, dry-run completeness) need human/runtime judgement and cannot be fully decided statically; flag them for review rather than auto-applying a guess. Given the user's elevated threat model, treat SECRETS-NO-PLAINTEXT-NO-LEAK, BASH-NO-EVAL-UNTRUSTED, and PY-SUBPROCESS-NO-SHELL as hard blockers.",
+  "references": [
+    "ShellCheck static analysis tool and wiki (https://www.shellcheck.net , https://github.com/koalaman/shellcheck/wiki)",
+    "Aaron Maxwell, 'Use the Unsafe Shell' / 'Bash Strict Mode' (set -euo pipefail, IFS) \u2014 http://redsymbol.net/articles/unofficial-bash-strict-mode/",
+    "GNU Bash Reference Manual \u2014 set builtin, trap, special parameters (LINENO, BASH_SOURCE), here documents (https://www.gnu.org/software/bash/manual/)",
+    "Google Shell Style Guide (https://google.github.io/styleguide/shellguide.html)",
+    "POSIX.1-2017 Shell Command Language and utility conventions; mktemp / flock man pages (note: flock(1) is util-linux, absent on macOS/BSD)",
+    "Python docs: argparse, logging, logging.handlers (SysLogHandler), subprocess (Security Considerations / shell=True warning), pathlib, dataclasses, tempfile (https://docs.python.org/3/library/)",
+    "Ruff linter rules incl. bandit-derived S602/S603/S605 (subprocess/shell), E722 (bare except), BLE001 (blind except) \u2014 https://docs.astral.sh/ruff/rules/",
+    "OWASP Command Injection and Python/Shell secure-coding guidance (https://owasp.org/www-community/attacks/Command_Injection)",
+    "Exit-code conventions: sysexits.h and the 128+N signal convention; gitleaks/trufflehog for secret scanning"
+  ],
+  "controls": [
+    {
+      "id": "BASH-STRICT-MODE",
+      "title": "Enable strict mode: set -euo pipefail with safe IFS",
+      "severity": "critical",
+      "rationale": "Default bash silently continues past failures, treats unset variables as empty (a classic cause of 'rm -rf $UNSET/' disasters), and only reports the exit status of the last command in a pipeline. set -e (errexit) aborts on uncaught failures, -u (nounset) turns unset-variable use into an error, -o pipefail makes a pipeline fail if any stage fails, and resetting IFS to newline+tab removes space-splitting surprises during word splitting and globbing of filenames with spaces.",
+      "check": "First non-comment, non-shebang executable line contains `set -euo pipefail` (or equivalent set -e; set -u; set -o pipefail) AND `IFS=$'\\n\\t'` is set near the top. Grep: rg -n 'set -euo pipefail' and rg -n \"IFS=\\$'\". shellcheck does not enforce this; verify by inspection/grep.",
+      "fix": "Insert immediately after the shebang: `set -Eeuo pipefail` (capital -E so ERR traps inherit into functions/subshells) and `IFS=$'\\n\\t'`. Audit any command whose nonzero exit is expected and guard it with `|| true` or an explicit `if` so errexit does not abort legitimately.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-ERR-EXIT-TRAP",
+      "title": "ERR trap with line number + single EXIT trap for cleanup",
+      "severity": "critical",
+      "rationale": "Without traps a strict-mode script dies silently with no context. An ERR trap (paired with set -E so it fires inside functions/subshells) reports the failing command, its line via ${LINENO}/${BASH_SOURCE}, and the exit code, turning an opaque abort into an actionable diagnostic. A single EXIT trap guarantees cleanup (temp dirs, locks, partial output) runs on every termination path: success, error, or signal. Consolidating cleanup into one EXIT handler prevents leak-on-early-return bugs.",
+      "check": "rg -n \"trap .*ERR\" and rg -n \"trap .*EXIT\". Confirm the ERR handler references LINENO/BASH_LINENO and BASH_SOURCE, and that exactly one EXIT trap performs cleanup (removing temp dirs and releasing locks). shellcheck SC2154/SC2086 catch some quoting issues inside handlers.",
+      "fix": "Add a single cleanup() invoked from `trap cleanup EXIT` and an error reporter from `trap 'err_trap $LINENO' ERR`. Make cleanup idempotent (guard with [[ -n ${TMPDIR:-} ]]) since it may run after partial setup. Use the deterministic trap+log scaffold transform.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-SIGNAL-HANDLING",
+      "title": "Handle INT/TERM/HUP for graceful shutdown",
+      "severity": "high",
+      "rationale": "Ctrl-C (SIGINT), `kill` (SIGTERM), and terminal hangup (SIGHUP) otherwise kill the script mid-operation, leaking temp files and locks and possibly leaving systems half-configured. Trapping these signals lets the script run cleanup and exit with the conventional 128+signal code, and kill background children. This is the difference between a daemon-safe script and one that corrupts state when an operator presses Ctrl-C.",
+      "check": "rg -n 'trap .*(INT|TERM|HUP|SIGINT|SIGTERM)'. Verify the handler triggers cleanup (often by re-raising after cleanup) and that long-running loops/background jobs are interruptible. Confirm exit code follows 128+N convention.",
+      "fix": "Add `trap 'on_signal INT' INT; trap 'on_signal TERM' TERM` where on_signal logs, runs cleanup (or lets the EXIT trap do it), kills child PIDs with `kill -- -$$` or tracked PIDs, and exits 130/143. Avoid heavy work inside signal handlers.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-SHELLCHECK-CLEAN",
+      "title": "shellcheck-clean with no blanket disables",
+      "severity": "critical",
+      "rationale": "shellcheck is the canonical static analyzer for shell and catches the overwhelming majority of real bash bugs: unquoted expansions, word-splitting, useless cat/echo, non-portable constructs, masked return values, and subshell variable-loss. A script that passes shellcheck at default severity has eliminated an entire class of latent failures. Blanket file-level disables hide real defects.",
+      "check": "Run `shellcheck -x -o all <script>` (or at least default level) and require zero findings. Reject file-wide `# shellcheck disable=` directives; allow only narrow, line-scoped disables each accompanied by a justifying comment. CI gate: shellcheck exit code 0.",
+      "fix": "Resolve each finding rather than suppressing: quote expansions (\"$var\", \"${arr[@]}\"), replace `for f in $(ls)` with globs, use `read -r`, capture command output without masking exit codes. Add `# shellcheck source=...` for sourced files and `-x` to follow them.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-STRICT-QUOTING",
+      "title": "Quote all expansions; safe arrays; no word-split bugs",
+      "severity": "critical",
+      "rationale": "Unquoted $var, $(cmd), and array expansions undergo word splitting and pathname expansion, breaking on spaces, tabs, newlines, and glob characters in filenames or input \u2014 the single most common shell bug and a security hole when input is attacker-influenced. Quoting (\"$var\", \"${arr[@]}\") and using arrays for command argument lists instead of space-joined strings makes argument boundaries explicit and injection-resistant.",
+      "check": "shellcheck flags SC2086 (unquoted), SC2068 (unquoted $@/array), SC2206/SC2207 (split-on-assignment). rg -n '\\$[A-Za-z_][A-Za-z0-9_]*' and inspect for missing quotes. Verify command args built as arrays (cmd=(...); \"${cmd[@]}\") not strings.",
+      "fix": "Quote every expansion unless intentional splitting is documented. Use `\"${arr[@]}\"` for arrays, `\"$@\"` to forward arguments verbatim, and `mapfile -t` / `read -r` to populate arrays from input. Build commands as arrays and invoke `\"${cmd[@]}\"`.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-ARG-PARSING",
+      "title": "Robust argument parsing with getopts + long flags",
+      "severity": "high",
+      "rationale": "Hand-rolled positional parsing breaks on flag order, missing values, and bundled short flags, and silently ignores typos. A real parser (getopts for short flags plus an explicit case loop for GNU-style long flags) validates inputs, distinguishes flags from positionals via `--`, errors on unknown options, and is the foundation for --help/--version/--dry-run/--verbose. This makes the script usable and scriptable by others without reading its source.",
+      "check": "rg -n 'getopts|while .* case .*--'. Confirm unknown flags produce an error + usage and exit nonzero, that required option values are validated, and that `--` ends option parsing. Verify each documented flag is actually wired.",
+      "fix": "Use the deterministic arg-parse skeleton: a `while [[ $# -gt 0 ]]` case loop handling --long and -s flags, --flag=value and --flag value forms, accumulating positionals, calling usage() on -h/--help and on unknown flags. Validate after parsing.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "CLI-HELP-USAGE",
+      "title": "Provide --help/-h usage text and exit 0",
+      "severity": "high",
+      "rationale": "Discoverability is a production requirement: an operator must be able to learn invocation without reading source. A --help that prints synopsis, every option with description, environment variables consulted, exit codes, and examples \u2014 then exits 0 \u2014 is the contract of a maintainable tool. Its absence forces tribal knowledge and causes misuse.",
+      "check": "Run `script --help` and `script -h`: must print usage including all flags and exit 0. For bash, grep for a usage()/print_help function. For python, argparse provides this automatically when add_help is left enabled \u2014 verify the parser description and per-argument help= strings are populated.",
+      "fix": "bash: implement usage() with a quoted here-doc (<<'EOF' to avoid expansion) covering synopsis, options, env vars, exit codes, examples; call it for -h/--help and on parse errors (to stderr, exit 2). python: set ArgumentParser(description=..., epilog=...) and help= on every add_argument.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "CLI-VERSION-FLAG",
+      "title": "Provide --version reporting a real version string",
+      "severity": "medium",
+      "rationale": "--version lets operators, bug reports, and config-management tools confirm which build is deployed and reproduce issues against a known revision. Embedding a version (semver or VCS hash) and printing it on --version is standard CLI hygiene and a prerequisite for change auditing.",
+      "check": "Run `script --version`: prints a non-empty version and exits 0. bash: grep for a VERSION variable/constant and a --version branch. python: argparse `action='version', version=...`.",
+      "fix": "bash: define `readonly VERSION=\"1.2.3\"` (optionally augmented with a git hash injected at build) and handle `--version) printf '%s %s\\n' \"$PROG\" \"$VERSION\"; exit 0;;`. python: parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}').",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "CLI-DRY-RUN",
+      "title": "Support --dry-run that mutates nothing",
+      "severity": "high",
+      "rationale": "Automation scripts that change systems must be testable without consequences. A --dry-run mode that logs every mutating action it WOULD take (writes, deletes, network POSTs, package installs) but performs none lets operators audit behavior on production before committing. It is also a forcing function for funneling all side effects through a single guarded path, which improves correctness.",
+      "check": "Run with --dry-run against a sandbox and confirm no files/services/state change (diff before/after). Code review: every mutating operation (rm, mv, write, curl POST, systemctl, package install) is gated by a DRY_RUN check or routed through a run()/maybe() wrapper that no-ops under dry-run.",
+      "fix": "Introduce a single wrapper, e.g. `run(){ if [[ $DRY_RUN == true ]]; then log INFO \"DRY-RUN: $*\"; else \"$@\"; fi }` and route all side-effecting commands through `run cmd args`. python: a flag checked by a do()/effect helper. Default DRY_RUN=false.",
+      "applies_to": "both",
+      "automatable": false
+    },
+    {
+      "id": "CLI-VERBOSE-QUIET",
+      "title": "Support --verbose/--quiet to control log verbosity",
+      "severity": "medium",
+      "rationale": "Operators need to dial output up for debugging and down for cron/pipeline noise. Wiring --verbose (and optionally --quiet/-q and -v stacking) to the logging level threshold gives a single, predictable knob instead of ad-hoc echo toggles. It keeps default output clean while preserving deep diagnostics on demand.",
+      "check": "Run with and without --verbose and confirm DEBUG-level lines appear only when verbose. bash: grep for a LOG_LEVEL/VERBOSE variable consulted by the log function. python: --verbose maps to logging.DEBUG, default INFO, --quiet to WARNING via setLevel.",
+      "fix": "bash: set LOG_LEVEL=DEBUG on --verbose, WARNING on --quiet, default INFO; the log() function compares the message level to LOG_LEVEL before emitting. python: logging.basicConfig(level=DEBUG if args.verbose else WARNING if args.quiet else INFO).",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "LOG-STRUCTURED-LEVELS",
+      "title": "Structured logging with levels + timestamps to stderr",
+      "severity": "high",
+      "rationale": "Bare echo gives no severity, no timestamp, and pollutes stdout (corrupting any data the script is meant to emit on stdout). A logging facility with DEBUG/INFO/WARN/ERROR levels, ISO-8601/RFC-3339 timestamps, and output to stderr (keeping stdout for real results) makes runs auditable, greppable, and pipeline-safe. Including the level and time is what lets log aggregation and post-mortems work.",
+      "check": "bash: a log() function emitting `timestamp [LEVEL] message` to stderr (>&2); confirm informational/diagnostic output never goes to stdout. python: logging.basicConfig with a Formatter including %(asctime)s %(levelname)s and a StreamHandler to stderr (default). Grep for stray `echo`/`print` used for logging.",
+      "fix": "bash: implement leveled log() writing to >&2 with `date -u +%Y-%m-%dT%H:%M:%SZ` and the level name; replace diagnostic echoes with log INFO/log ERROR. python: configure the logging module once at startup; never use print() for logs. Use the trap+log scaffold transform.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "LOG-SYSLOG-OPTION",
+      "title": "Optionally emit to syslog/journald for unattended runs",
+      "severity": "low",
+      "rationale": "Scripts run under cron, systemd, or launchd have no attached terminal; their stderr may be discarded. Optionally tee logs to syslog (via `logger`) or journald gives centralized, rotated, timestamped retention and alerting integration without bespoke file management. This is what makes a script observable in production rather than a black box.",
+      "check": "Look for an optional path that calls `logger -t <tag> -p <facility>.<level>` (bash) or logging.handlers.SyslogHandler (python), typically toggled by a flag or by detecting non-interactive stdin (`[[ -t 2 ]]`). Not required for interactive-only tools.",
+      "fix": "bash: in log(), when --syslog is set or stderr is not a TTY, also call `logger -t \"$PROG[$$]\" -p \"user.${level,,}\" -- \"$message\"`. python: attach a SysLogHandler (or journald via systemd.journal) alongside the stream handler when running non-interactively.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "PREFLIGHT-DEPENDENCIES",
+      "title": "Preflight check for required commands and versions",
+      "severity": "high",
+      "rationale": "A script that fails halfway because `jq` or `curl` is missing leaves systems in a partial state and produces a confusing mid-run error. A preflight loop that verifies every external dependency exists (and meets a minimum version where it matters) before doing any work converts a late, messy failure into an early, clear one with an actionable message. It also documents the script's runtime contract.",
+      "check": "Grep for a require()/need() helper using `command -v <tool>` for each external binary used (curl, jq, awk, git, etc.), invoked before side effects. Verify bash version guard if associative arrays / mapfile are used (requires bash >= 4; macOS default is 3.2). Confirm clear error + nonzero exit when a dependency is absent.",
+      "fix": "Add `require(){ command -v \"$1\" >/dev/null 2>&1 || { log ERROR \"missing dependency: $1\"; exit 3; }; }` and call it for each tool at startup. Guard bash version with `((BASH_VERSINFO[0] >= 4))` when needed. python: catch ImportError early or check shutil.which for external tools.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "PREFLIGHT-ENV-VALIDATION",
+      "title": "Validate required env vars and input args before work",
+      "severity": "high",
+      "rationale": "Required configuration delivered via environment variables or arguments must be validated up front: present, non-empty, well-formed (paths exist, numbers are numeric, enums are in range). Under `set -u` an unset var aborts, but an empty or malformed value passes silently and corrupts downstream behavior. Front-loading validation prevents acting on bad input and gives precise error messages.",
+      "check": "Look for explicit checks: `: \"${REQUIRED_VAR:?must be set}\"` for mandatory vars, range/format validation for numeric and path inputs, and existence checks for input files/dirs (`[[ -r $file ]]`). python: argparse type=/choices=/required= plus post-parse assertions.",
+      "fix": "bash: use `: \"${VAR:?error message}\"` for required vars, validate formats with regex (`[[ $x =~ ^[0-9]+$ ]]`), and check file readability before use. python: lean on argparse type=pathlib.Path, choices=, required=True, and add explicit validation raising SystemExit(2) on bad input.",
+      "applies_to": "both",
+      "automatable": false
+    },
+    {
+      "id": "BASH-LOCKFILE-SINGLEINSTANCE",
+      "title": "Single-instance lock to prevent concurrent runs",
+      "severity": "high",
+      "rationale": "Cron/timer-driven scripts can overlap when a run exceeds its interval, causing duplicated work, race conditions, and corrupted state. A lock guarantees one instance at a time. Note portability: flock(1) is Linux/util-linux only and is NOT present on macOS, so a portable script must fall back to an atomic `mkdir`-based mutex or `set -o noclobber` lockfile (both atomic on POSIX) and store the PID for stale-lock detection. The lock must be released via the EXIT trap.",
+      "check": "Grep for `flock`, `mkdir \"$LOCKDIR\"`, or `set -o noclobber` + `> \"$LOCKFILE\"`. Verify the lock is acquired atomically (test-and-set, not test-then-create), the PID is recorded, stale locks from dead PIDs are reclaimed, and the lock is removed in cleanup/EXIT. On macOS confirm it does NOT rely on flock(1).",
+      "fix": "Use the portable lockfile transform: attempt `mkdir \"$LOCKDIR\"` (atomic); on failure read the stored PID and, if `kill -0 $pid` fails, reclaim; otherwise log and exit nonzero. On Linux you may instead use `exec {fd}>$LOCKFILE; flock -n $fd || exit`. Always `rmdir`/release in the EXIT trap.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-MKTEMP-CLEANUP",
+      "title": "Create temp files/dirs with mktemp and trap-clean them",
+      "severity": "high",
+      "rationale": "Hardcoded temp paths (/tmp/myscript.tmp) are predictable, enabling symlink/race attacks, and collide between concurrent runs. mktemp -d creates a uniquely named, race-free, 0700 directory; putting all scratch state under it and removing it in the EXIT trap guarantees no leaks and no leftovers on crash. Note mktemp flags differ (GNU needs no template, BSD/macOS accepts `mktemp -d` and a trailing-X template) \u2014 use the portable form.",
+      "check": "Grep for `mktemp -d` (or `mktemp`) and confirm the result is stored, used for all scratch files, and removed via `rm -rf -- \"$TMPDIR\"` in cleanup/EXIT. Reject hardcoded /tmp paths and `$$`-based names. Verify the template/flags work on the target OS.",
+      "fix": "`TMPDIR_RUN=$(mktemp -d \"${TMPDIR:-/tmp}/${PROG}.XXXXXX\")` then guard cleanup: `[[ -n ${TMPDIR_RUN:-} && -d $TMPDIR_RUN ]] && rm -rf -- \"$TMPDIR_RUN\"`. python: tempfile.TemporaryDirectory() as a context manager (auto-cleanup). Use the mktemp cleanup transform.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "IDEMPOTENCY",
+      "title": "Operations are idempotent / safely re-runnable",
+      "severity": "high",
+      "rationale": "Production automation reruns after partial failure, on retries, and on schedules. Operations must be safe to repeat: check-before-create (don't fail if a dir/user/line already exists), use declarative targets (mkdir -p, rsync, conditional appends guarded by grep -q), and write outputs atomically (temp file + mv) so a re-run converges to the same state rather than duplicating or erroring. Non-idempotent scripts amplify failures.",
+      "check": "Run the script twice in a row against the same target and confirm identical end state with no errors on the second run. Code review: mkdir -p not bare mkdir; append-if-absent guards; atomic writes (write tmp then mv); INSERT...IF NOT EXISTS / upsert semantics; no blind appends.",
+      "fix": "Replace create-or-fail with check-or-create (mkdir -p, `grep -qxF line file || printf '%s\\n' line >> file`). Write to `$tmp` then `mv -f \"$tmp\" \"$dest\"` for atomic publish. Make external calls upserts. Guard each mutation so re-running is a no-op when already applied.",
+      "applies_to": "both",
+      "automatable": false
+    },
+    {
+      "id": "BASH-ROOT-GUARD",
+      "title": "Guard privilege requirements (require or refuse root)",
+      "severity": "medium",
+      "rationale": "Scripts that modify system state need a deterministic privilege check: either require root and fail fast with a clear message if not (avoiding half-applied changes), or explicitly refuse to run as root when they shouldn't (avoiding accidental damage / wrong-owner files). Detecting EUID up front removes a whole category of permission-denied-mid-run failures and footguns.",
+      "check": "Grep for `EUID`/`id -u` checks. For privileged scripts: `[[ $EUID -eq 0 ]] || { log ERROR 'must run as root'; exit 4; }`. For user scripts that must not be root: the inverse guard. Confirm the message tells the user how to proceed (e.g., 'rerun with sudo').",
+      "fix": "Add a guard near startup: privileged \u2192 `[[ ${EUID:-$(id -u)} -eq 0 ]] || die 'requires root; rerun with sudo'`; unprivileged \u2192 `[[ ${EUID:-$(id -u)} -ne 0 ]] || die 'do not run as root'`. python: os.geteuid() with sys.exit. Make it skippable under --dry-run if appropriate.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "NET-RETRY-BACKOFF",
+      "title": "Retry network/flaky ops with exponential backoff + cap",
+      "severity": "high",
+      "rationale": "Network calls, package installs, and remote APIs fail transiently. A single attempt makes the whole script brittle; an unbounded retry loop hammers the dependency. Bounded retries with exponential backoff (and ideally jitter) absorb transient failures while respecting the remote service and guaranteeing eventual termination. This is the difference between a script that flakes nightly and one that is reliable on real networks.",
+      "check": "Look for a retry wrapper around curl/wget/git/apt/api calls: a loop with max attempts, sleep that grows (e.g., 1,2,4,8s), and a final hard failure with a clear message. Verify curl uses `--fail --retry`/timeouts; that only idempotent ops are retried; and that the loop is bounded (terminates).",
+      "fix": "Wrap calls in `retry(){ local n=0 max=5 delay=1; until \"$@\"; do n=$((n+1)); ((n>=max)) && return 1; log WARN \"retry $n/$max in ${delay}s\"; sleep $delay; delay=$((delay*2)); done }` and call `retry curl --fail --max-time 30 ...`. python: a decorator/loop with capped exponential backoff. Use the retry transform.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "NET-TIMEOUTS",
+      "title": "Set explicit timeouts on all network/external calls",
+      "severity": "high",
+      "rationale": "Without timeouts a hung connection or unresponsive host blocks the script indefinitely, holding locks and stalling pipelines/cron. Explicit connect and total timeouts bound worst-case runtime and let retry logic kick in. A timeout-less curl/wget/socket is a latent hang waiting for a bad network day.",
+      "check": "Grep curl/wget for `--max-time`/`--connect-timeout` (curl) or `--timeout` (wget); ssh for `ConnectTimeout`; python requests/urllib for an explicit `timeout=`. Flag any external call lacking a bound. Consider wrapping arbitrary commands with `timeout <dur> cmd`.",
+      "fix": "curl: add `--connect-timeout 10 --max-time 60`. wget: `--timeout=60 --tries=1`. ssh: `-o ConnectTimeout=10`. python: pass `timeout=` to every requests/socket/subprocess call (subprocess.run(..., timeout=...)). Wrap opaque commands in `timeout`.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "EXIT-CODE-DISCIPLINE",
+      "title": "Distinct, documented exit codes per failure class",
+      "severity": "high",
+      "rationale": "Callers (cron, CI, orchestrators, parent scripts) branch on exit status. A script that exits 1 for everything is unscriptable. Assigning stable, documented codes \u2014 0 success, 2 usage error, 3 missing dependency, 4 permission, 5 lock held, etc. \u2014 lets automation react correctly and aids debugging. Reserve 0 strictly for full success; never exit 0 on a handled error.",
+      "check": "Grep `exit`/`return`/`die` calls and confirm distinct codes per error class, documented in --help. Verify success paths exit 0 and error paths nonzero; that `set -e` aborts propagate a meaningful code; and that codes don't collide with reserved 126/127/128+N. python: sys.exit(int) per class.",
+      "fix": "Define named constants (E_USAGE=2 E_DEP=3 E_PERM=4 E_LOCK=5 ...), `die(){ log ERROR \"$2\"; exit \"$1\"; }`, and document the table in usage(). python: raise SystemExit(code) or sys.exit(code) with an exit-code enum. Ensure the EXIT trap preserves $? and doesn't reset it to 0.",
+      "applies_to": "both",
+      "automatable": true
+    },
+    {
+      "id": "BASH-NO-EVAL-UNTRUSTED",
+      "title": "No eval / no shell-injection of untrusted input",
+      "severity": "critical",
+      "rationale": "`eval`, `bash -c \"$var\"`, unquoted expansion into command position, and building commands by string concatenation let any attacker-influenced value (filenames, env, API responses, args) execute arbitrary code. This is the top shell security vulnerability. Avoiding eval and passing data as quoted positional arguments / arrays keeps data and code separated.",
+      "check": "Grep for `eval`, `bash -c`, `sh -c`, backticks around variables, and unquoted variables in command position. shellcheck flags many (SC2048, SC2086, SC2294). Any eval of a value derived from input/args/network is a critical finding. Verify dynamic commands use arrays, not string-built command lines.",
+      "fix": "Eliminate eval; pass values as quoted args `cmd \"$value\"` or build an array `args=(...) ; cmd \"${args[@]}\"`. For dynamic dispatch use a case statement or an allowlisted associative array of functions, never eval. Treat all external input as data, never code.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "BASH-HEREDOC-SAFETY",
+      "title": "Quote here-doc delimiters to prevent unintended expansion/injection",
+      "severity": "medium",
+      "rationale": "An unquoted here-doc (`<<EOF`) performs parameter, command, and arithmetic expansion on its body. If the body is a config file, SQL, or a script written to disk and it contains $ or `...`, values leak in or commands execute \u2014 a correctness and injection risk. Quoting the delimiter (`<<'EOF'`) makes the body literal; `<<-EOF` allows tab-indentation. Choose expansion explicitly rather than by accident.",
+      "check": "Grep for `<<` here-docs and check whether the delimiter is quoted. Unquoted here-docs that emit config/scripts/SQL containing $ or backticks are findings unless expansion is clearly intended and the inputs are trusted. shellcheck SC2154 may surface related issues.",
+      "fix": "Use `<<'EOF'` (quoted) when the body must be literal; use unquoted `<<EOF` only when you deliberately interpolate trusted variables. For indented readability use `<<-'EOF'` with leading tabs. Never interpolate untrusted data into an unquoted here-doc.",
+      "applies_to": "bash",
+      "automatable": true
+    },
+    {
+      "id": "PY-ARGPARSE-MAIN-GUARD",
+      "title": "argparse-based CLI behind a __name__=='__main__' guard",
+      "severity": "high",
+      "rationale": "Top-level executable code runs on import, breaking testing and reuse and causing side effects when the module is imported by tooling. Putting the CLI in main(argv) parsed by argparse and invoking it from `if __name__ == '__main__': sys.exit(main())` makes the script both runnable and importable/testable, gives free --help and type/choice validation, and yields a clean exit-code path.",
+      "check": "Grep for `import argparse`, an `ArgumentParser`, a `def main(`, and `if __name__ == '__main__':`. Confirm no work happens at module top level, main returns/propagates an int exit code, and arguments use type=/choices=/required= and help= strings.",
+      "fix": "Refactor into `def main(argv=None) -> int:` building an ArgumentParser, parsing args, doing work, returning an exit code; then `if __name__ == '__main__': raise SystemExit(main())`. Use the python skeleton transform.",
+      "applies_to": "python",
+      "automatable": true
+    },
+    {
+      "id": "PY-EXCEPTIONS-EXITCODES",
+      "title": "Narrow exception handling mapped to sys.exit codes; no bare except",
+      "severity": "critical",
+      "rationale": "Bare `except:` (and overbroad `except Exception` without re-raise) swallows KeyboardInterrupt, SystemExit, and real bugs, hiding failures and producing zero exit codes on error. Catching specific exceptions, logging with logging.exception (traceback), and mapping each failure class to a distinct sys.exit code gives correct, debuggable, scriptable behavior. Let unexpected exceptions propagate (nonzero exit) rather than masking them.",
+      "check": "Grep for `except:` (bare) and `except Exception` \u2014 flag bare except always, and broad except unless it logs and re-raises or exits nonzero. ruff rules E722 (bare except) and BLE001 catch these. Confirm error paths call sys.exit(nonzero) and success returns 0.",
+      "fix": "Replace bare/broad except with specific types (FileNotFoundError, subprocess.CalledProcessError, requests.RequestException...). In each handler call logging.exception(...) and sys.exit(<code>). Keep a top-level handler in main() that maps known errors to codes and lets the rest surface a traceback.",
+      "applies_to": "python",
+      "automatable": true
+    },
+    {
+      "id": "PY-SUBPROCESS-NO-SHELL",
+      "title": "subprocess with list args, check=True, never shell=True on input",
+      "severity": "critical",
+      "rationale": "subprocess with `shell=True` and an interpolated string is a shell-injection hole identical to bash eval. Passing a list of arguments (['git','clone',url]) with shell=False bypasses the shell entirely, so no value can be interpreted as code. Using check=True (or checking returncode) ensures failures aren't silently ignored, and timeout= bounds hangs. This is the single most important Python automation-security control.",
+      "check": "Grep for `shell=True` (flag any with non-constant/interpolated command), `os.system`, and `subprocess.*` calls without check=True/explicit returncode handling or without timeout=. ruff S602/S603/S605 (bandit-derived) catch shell=True and os.system. Confirm commands are lists, not f-strings.",
+      "fix": "Use `subprocess.run([...], check=True, timeout=..., capture_output=True, text=True)`; remove shell=True (or, if a shell is unavoidable, pass a list and shell=False, never interpolate input). Replace os.system with subprocess.run. Handle CalledProcessError/TimeoutExpired explicitly.",
+      "applies_to": "python",
+      "automatable": true
+    },
+    {
+      "id": "PY-TYPING-PATHLIB-CTXMGR-LOGGING",
+      "title": "Type hints, pathlib, context managers, dataclasses, logging config",
+      "severity": "medium",
+      "rationale": "These are the maintainability and correctness baseline for production Python. Type hints (checked by mypy) catch interface bugs before runtime. pathlib replaces fragile os.path string-munging with safe, OS-correct path objects. Context managers (with open(...)/resources) guarantee files/locks/sockets close even on exception, preventing descriptor leaks. dataclasses give structured, validated config instead of loose dicts/tuples. The logging module (configured once, not print) provides leveled, timestamped, redirectable output. Together they make the script robust, testable, and observable.",
+      "check": "mypy --strict passes (or function signatures are annotated). Grep for os.path string ops that should be pathlib; for `open(` without a `with`; for print() used as logging; for config passed as bare dicts where a @dataclass fits. ruff/flake8 + mypy gate these.",
+      "fix": "Annotate all function signatures and run mypy in CI. Use pathlib.Path for filesystem work. Wrap every resource in `with`. Model config/records as @dataclass (frozen where immutable). Configure logging.basicConfig once at startup and use a module logger; never print() for diagnostics.",
+      "applies_to": "python",
+      "automatable": true
+    },
+    {
+      "id": "SECRETS-NO-PLAINTEXT-NO-LEAK",
+      "title": "No hardcoded secrets; keep secrets off the command line and out of logs",
+      "severity": "critical",
+      "rationale": "Secrets baked into source leak via VCS and backups. Secrets passed as command-line arguments are world-visible in `ps`/proc and shell history. Secrets echoed into logs/error messages persist in aggregation systems. Production scripts must source credentials from env vars or files with restrictive permissions, never log them, and disable shell tracing (set +x) around their use. Given the user's elevated threat model this is non-negotiable.",
+      "check": "Grep for high-entropy strings, `password=`, `token=`, `api_key=`, `AKIA`, PEM headers in source. Confirm secrets come from env/files (mode 600), are never passed as argv to other tools, and never interpolated into log lines. Verify `set -x` is not active while handling secrets. Tools: gitleaks/trufflehog.",
+      "fix": "Move secrets to environment variables or a 0600 file read at runtime; reference them by indirection, not value, in logs. Pass to subprocesses via env or stdin, not argv. Wrap secret-handling in `set +x` ... `set -x`. python: read from os.environ / a secrets file; never log the value; scrub before printing errors.",
+      "applies_to": "both",
+      "automatable": true
+    }
+  ],
+  "deterministic_transforms": [
+    {
+      "id": "DT-BASH-STRICT-HEADER",
+      "description": "Canonical strict-mode bash header: portable shebang via env, capital -E so traps inherit into functions/subshells, errexit/nounset/pipefail, safe IFS, and immutable program metadata. Paste directly under any new or hardened bash script.",
+      "trigger": "Bash script missing `set -euo pipefail`, safe IFS, or program-name/version constants (controls BASH-STRICT-MODE, CLI-VERSION-FLAG).",
+      "implementation": "#\n# <one-line description>\n#\nset -Eeuo pipefail\nIFS=$'\\n\\t'\n\n# --- program metadata ---------------------------------------------------\nreadonly PROG=\"${0##*/}\"\nreadonly VERSION=\"1.0.0\"\nreadonly SCRIPT_DIR=\"$(cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")\" >/dev/null 2>&1 && pwd -P)\"\n\n# --- exit codes ---------------------------------------------------------\nreadonly E_OK=0 E_USAGE=2 E_DEP=3 E_PERM=4 E_LOCK=5 E_RUNTIME=1\n\n# --- runtime flags (defaults) -------------------------------------------\nDRY_RUN=false\nVERBOSE=false\nLOG_LEVEL=\"INFO\"",
+      "placement": "Top of the file, replacing the existing shebang and any ad-hoc `set` lines."
+    },
+    {
+      "id": "DT-BASH-LOG-TRAP-SCAFFOLD",
+      "description": "Structured leveled logger writing timestamped lines to stderr, an optional run() wrapper honoring --dry-run, a die() helper, and the ERR/EXIT/signal trap set with cleanup. Provides BASH-ERR-EXIT-TRAP, BASH-SIGNAL-HANDLING, LOG-STRUCTURED-LEVELS, CLI-DRY-RUN, and EXIT-CODE-DISCIPLINE in one block.",
+      "trigger": "Bash script uses echo for diagnostics, lacks traps, or has no cleanup path (controls BASH-ERR-EXIT-TRAP, LOG-STRUCTURED-LEVELS, BASH-SIGNAL-HANDLING).",
+      "implementation": "# --- logging ------------------------------------------------------------\n_level_num(){ case \"$1\" in DEBUG) echo 10;; INFO) echo 20;; WARN) echo 30;; ERROR) echo 40;; *) echo 20;; esac; }\nlog(){\n  local level=\"$1\"; shift\n  (( $(_level_num \"$level\") < $(_level_num \"$LOG_LEVEL\") )) && return 0\n  printf '%s [%s] %s: %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$level\" \"$PROG\" \"$*\" >&2\n}\ndie(){ local code=\"$1\"; shift; log ERROR \"$*\"; exit \"$code\"; }\n\n# --- side-effect wrapper (honors --dry-run) -----------------------------\nrun(){\n  if [[ \"$DRY_RUN\" == true ]]; then log INFO \"DRY-RUN: $*\"; return 0; fi\n  \"$@\"\n}\n\n# --- cleanup + traps ----------------------------------------------------\ncleanup(){\n  local rc=$?\n  [[ -n \"${TMPDIR_RUN:-}\" && -d \"${TMPDIR_RUN:-}\" ]] && rm -rf -- \"$TMPDIR_RUN\"\n  [[ -n \"${LOCKDIR:-}\" && -d \"${LOCKDIR:-}\" ]] && rmdir -- \"$LOCKDIR\" 2>/dev/null || true\n  return $rc\n}\nerr_trap(){ local line=\"$1\" code=\"$2\"; log ERROR \"failed at line ${line} (exit ${code})\"; }\non_signal(){ local sig=\"$1\"; log WARN \"received SIG${sig}; aborting\"; exit $((128 + $(kill -l \"$sig\") )); }\n\ntrap 'err_trap \"${LINENO}\" \"$?\"' ERR\ntrap cleanup EXIT\ntrap 'on_signal INT'  INT\ntrap 'on_signal TERM' TERM\ntrap 'on_signal HUP'  HUP",
+      "placement": "After the strict-mode header, before argument parsing and the main body."
+    },
+    {
+      "id": "DT-BASH-ARGPARSE-SKELETON",
+      "description": "Argument parser supporting GNU-style long flags and short flags, both --opt value and --opt=value forms, --help/--version/--dry-run/--verbose/--quiet, positional collection, unknown-flag rejection, and a quoted-here-doc usage(). Implements BASH-ARG-PARSING, CLI-HELP-USAGE, CLI-VERSION-FLAG, CLI-DRY-RUN, CLI-VERBOSE-QUIET.",
+      "trigger": "Bash script parses $1/$2 positionally or lacks --help/--version/--dry-run/--verbose (controls BASH-ARG-PARSING, CLI-HELP-USAGE).",
+      "implementation": "usage(){\n  cat <<'EOF'\nUsage: PROG [OPTIONS] [ARGS...]\n\n  Short description of what the script does.\n\nOptions:\n  -h, --help        Show this help and exit\n      --version     Print version and exit\n  -n, --dry-run     Show actions without performing them\n  -v, --verbose     Enable debug logging\n  -q, --quiet       Only log warnings and errors\n\nExit codes:\n  0 success  2 usage  3 missing dependency  4 permission  5 lock held\nEOF\n}\n\nPOSITIONAL=()\nwhile [[ $# -gt 0 ]]; do\n  case \"$1\" in\n    -h|--help)    usage; exit 0 ;;\n    --version)    printf '%s %s\\n' \"$PROG\" \"$VERSION\"; exit 0 ;;\n    -n|--dry-run) DRY_RUN=true; shift ;;\n    -v|--verbose) VERBOSE=true; LOG_LEVEL=\"DEBUG\"; shift ;;\n    -q|--quiet)   LOG_LEVEL=\"WARN\"; shift ;;\n    --opt=*)      OPT=\"${1#*=}\"; shift ;;\n    --opt)        OPT=\"${2:?--opt requires a value}\"; shift 2 ;;\n    --)           shift; POSITIONAL+=(\"$@\"); break ;;\n    -*)           usage >&2; die \"$E_USAGE\" \"unknown option: $1\" ;;\n    *)            POSITIONAL+=(\"$1\"); shift ;;\n  esac\ndone\nset -- \"${POSITIONAL[@]:-}\"",
+      "placement": "After the log/trap scaffold; replace the script's existing argument handling. Replace the literal PROG in the here-doc with the real program name if you want it interpolated (use an unquoted here-doc only if so)."
+    },
+    {
+      "id": "DT-BASH-LOCKFILE-PORTABLE",
+      "description": "Portable single-instance lock using an atomic mkdir mutex with PID-based stale-lock reclamation. Works on macOS and Linux WITHOUT flock(1) (which macOS lacks). The lock is released by the EXIT cleanup trap. Implements BASH-LOCKFILE-SINGLEINSTANCE.",
+      "trigger": "Bash script can be run concurrently (cron/timer/manual) and has no lock, or relies on flock(1) which is absent on macOS (control BASH-LOCKFILE-SINGLEINSTANCE).",
+      "implementation": "# --- single-instance lock (portable; no flock(1) needed) ----------------\nLOCKDIR=\"${TMPDIR:-/tmp}/${PROG}.lock\"\nacquire_lock(){\n  if mkdir -- \"$LOCKDIR\" 2>/dev/null; then\n    printf '%s\\n' \"$$\" > \"$LOCKDIR/pid\"\n    return 0\n  fi\n  local oldpid=\"\"\n  [[ -r \"$LOCKDIR/pid\" ]] && oldpid=\"$(cat -- \"$LOCKDIR/pid\" 2>/dev/null || true)\"\n  if [[ -n \"$oldpid\" ]] && kill -0 \"$oldpid\" 2>/dev/null; then\n    die \"$E_LOCK\" \"another instance is running (pid ${oldpid})\"\n  fi\n  log WARN \"reclaiming stale lock (pid ${oldpid:-unknown})\"\n  rm -rf -- \"$LOCKDIR\"\n  mkdir -- \"$LOCKDIR\" || die \"$E_LOCK\" \"failed to acquire lock\"\n  printf '%s\\n' \"$$\" > \"$LOCKDIR/pid\"\n}\nacquire_lock   # released by cleanup() in the EXIT trap",
+      "placement": "After argument parsing and dependency preflight, before the main work begins. Cleanup of LOCKDIR is already handled by the trap scaffold's cleanup()."
+    },
+    {
+      "id": "DT-BASH-MKTEMP-PREFLIGHT-RETRY",
+      "description": "Three companion helpers: a portable mktemp scratch dir (cleaned by the EXIT trap), a dependency preflight loop, a root guard, and a bounded exponential-backoff retry wrapper for network ops. Implements BASH-MKTEMP-CLEANUP, PREFLIGHT-DEPENDENCIES, BASH-ROOT-GUARD, NET-RETRY-BACKOFF, NET-TIMEOUTS.",
+      "trigger": "Bash script uses hardcoded /tmp paths, runs external tools without checking they exist, performs unretried network calls, or needs a privilege guard (controls BASH-MKTEMP-CLEANUP, PREFLIGHT-DEPENDENCIES, NET-RETRY-BACKOFF).",
+      "implementation": "# --- scratch dir (removed by cleanup() in EXIT trap) --------------------\nTMPDIR_RUN=\"$(mktemp -d \"${TMPDIR:-/tmp}/${PROG}.XXXXXX\")\"\n\n# --- dependency preflight ----------------------------------------------\nrequire(){\n  local missing=0 t\n  for t in \"$@\"; do\n    command -v \"$t\" >/dev/null 2>&1 || { log ERROR \"missing dependency: $t\"; missing=1; }\n  done\n  (( missing == 0 )) || exit \"$E_DEP\"\n}\nrequire curl jq awk   # <- list the binaries this script actually needs\n\n# --- root guard (use ONE of these) -------------------------------------\n# require root:    [[ ${EUID:-$(id -u)} -eq 0 ]] || die \"$E_PERM\" 'must run as root (try sudo)'\n# refuse root:     [[ ${EUID:-$(id -u)} -ne 0 ]] || die \"$E_PERM\" 'do not run as root'\n\n# --- retry with exponential backoff ------------------------------------\nretry(){\n  local max=5 n=0 delay=1\n  until \"$@\"; do\n    n=$((n + 1))\n    if (( n >= max )); then log ERROR \"command failed after ${max} attempts: $*\"; return 1; fi\n    log WARN \"attempt ${n}/${max} failed; retrying in ${delay}s\"\n    sleep \"$delay\"; delay=$((delay * 2))\n  done\n}\n# usage: retry curl --fail --connect-timeout 10 --max-time 60 -fsSL \"$url\" -o \"$TMPDIR_RUN/out\"",
+      "placement": "After the lock acquisition; require/root-guard run before any work, mktemp before any scratch use, retry() defined before the main body uses it."
+    }
+  ]
+}

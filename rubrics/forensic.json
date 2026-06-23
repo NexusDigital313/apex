@@ -1,0 +1,394 @@
+{
+  "domain": "forensic",
+  "target_standard": "Courtroom-admissible acquisition: FRE 901/902 authentication & self-authentication, Daubert reliability, NIST SP 800-86 (IR forensics), NIST SP 800-101r1 (mobile), ACPO 4 principles, SWGDE Best Practices for Computer/Image Acquisition, ISO/IEC 27037:2012, RFC 3227 (order of volatility), RFC 3161 (timestamping)",
+  "summary": "This rubric promotes a \"basic dd-style\" acquisition script to evidence that survives a Daubert challenge and authenticates under FRE 901/902. The thesis: admissibility is not a feature you add at the end \u2014 it is the cumulative product of (1) provable non-alteration of the source (write-blocking, RO mounting, no atime/mtime changes), (2) cryptographic integrity established at acquisition and re-verified independently with two independent hash algorithms that HARD-FAIL on any mismatch, (3) a contemporaneous, append-only, attributable chain-of-custody record (who/what/when/where/why, examiner identity + credentials, UTC+TZ timestamps, tool name+version, exact command line), (4) forensically sound tooling that logs errors and hashes inline (dc3dd/dcfldd/ewfacquire \u2014 never bare dd), (5) correct non-destructive ordering per RFC 3227 (memory \u2192 network \u2192 disk), and (6) tamper-evident sealing (GPG detached signature + optional RFC 3161 timestamp). Every control below is written so a defense expert cannot find a gap between \"what the script did\" and \"what the examiner testifies it did.\" Severity reflects how fatal the gap is to admissibility: a hash mismatch that does not hard-fail, or a missing pre-image hash, is case-ending; a missing photograph is impeachment material. The deterministic_transforms are the exact shell the engine injects to make the script abort-on-any-error, capture the custody header, rewrite bare dd to dc3dd, enforce read-only, compute+verify dual hashes, and seal the output. Environment note: tooling is Linux-target (host checked was macOS arm64; dc3dd/losetup/blockdev absent \u2014 expected, these run on the acquisition workstation/boot media, not the analyst laptop).",
+  "llm_guidance": "When auditing or hardening an acquisition script, apply this order of reasoning and do not skip steps:\n\n1. CLASSIFY the script first: dead/powered-off media imaging vs. live/powered-on host. Volatility-order controls (FOR-VOLATILITY-ORDER, FOR-MEMORY-CAPTURE, FOR-NETWORK-STATE) ONLY apply to live hosts \u2014 do not flag a dead-disk imager for 'missing memory capture'. State which class you detected in one line.\n\n2. The HARD-FAIL gate is the spine. The single most common fatal flaw is a script that computes hashes but never compares them, or compares but continues on mismatch (logs a warning, keeps going, seals anyway). Trace the control flow from imaging \u2192 hash \u2192 compare \u2192 seal and confirm a mismatch CANNOT reach the seal step. If verification is not a hard exit that is upstream of sealing, that is critical regardless of how good everything else looks.\n\n3. Never accept bare dd for evidence. If you see dd if=...of=... for acquisition, rewrite to dc3dd (DT-DD-TO-DC3DD) or ewfacquire. Bare dd silently mishandles read errors and computes no hash \u2014 it is per se unsound. Exception: dd of /dev/zero for target sterilization is fine.\n\n4. Dual-hash means two DIFFERENT algorithm families. sha256+sha512 is preferred. sha256+md5 is acceptable ONLY when legacy cross-tool verification demands MD5, and MD5 must NEVER appear alone \u2014 call out standalone-MD5 as critical. Two runs of the same algorithm is not dual-hashing.\n\n5. Source non-alteration is non-negotiable. Require either a hardware write-blocker attestation in the log OR software RO (blockdev --setro + getro==1 assertion). RO mounts must use ro,noload,noatime. If the script mounts the source rw, or mounts without noload (ext journal replay writes to source), flag high.\n\n6. Attribution beats cryptography in court. A perfect hash with no examiner name, no evidence ID, no UTC timestamp, no command-line record, and no append-only log is inadmissible because no human can authenticate it under FRE 901. Treat the chain-of-custody header as load-bearing as the hash.\n\n7. Timestamps: demand UTC + explicit offset (date -u, ISO 8601). Reject naive local times.\n\n8. Idempotency / no-clobber: re-running must never overwrite prior evidence. Existing-file guards are required; namespacing by EVIDENCE_ID + UTC is the fix.\n\n9. When you inject transforms, inject in dependency order: DT-STRICT-TRAP first (so every later failure aborts), then DT-COC-HEADER, then DT-RO-ENFORCE / DT-STERILE-TARGET, then DT-DD-TO-DC3DD, then DT-DUAL-HASH-VERIFY (the gate), then DT-SEAL last. Sealing must be structurally unreachable unless verification passed.\n\n10. Tool/version/clock-source capture and the reproducibility statement are what make the method survive Daudit/Daubert 'can someone else reproduce this' \u2014 always present, even if low severity.\n\n11. Do not over-claim. If the host lacks the forensic tools (e.g. a macOS analyst box has no dc3dd/losetup/blockdev), note that these controls target the LINUX acquisition workstation / forensic boot media, not the analyst's laptop \u2014 do not mark the controls inapplicable, mark the environment as the wrong place to RUN them.\n\n12. Severity calibration for findings: missing/ignored hash verification, missing pre-image source hash, bare dd, standalone MD5, no write-blocking, no strict-mode/trap = critical (case-ending). Missing examiner attribution, non-UTC time, no error log, rw/journal mount, no sterile-target verify = high (impeachment / strong challenge). Missing photos, missing network-state snapshot, no TSA, no segmentation = medium/low (corroboration gaps).\n\nAuditor addendum \u2014 also ensure: FOR-MEMORY-ACQUISITION: No control governs volatile memory capture itself. The summary cites RFC 3227 order-of-volatility (memory before disk) and the standard claims NIST SP 800-86, but every control targets block/disk media. Missing: use of a sound memory acquirer (LiME/AVML/winpktmon-equivalent), the impossibility of pre-hashing live RAM (you hash the OUTPUT image, not the volatile source \u2014 FOR-PRE-HASH-SRC is logically inapplicable to RAM and the rubric never says so), documentation of the acquisition tool's memory footprint/observer effect, and capture of a matching kernel profile/symbol map for later analysis.; FOR-HPA-DCO-ACCESS: No control for detecting/handling Host Protected Area (HPA) and Device Configuration Overlay (DCO) on ATA disks. A bit-for-bit image that silently omits HPA/DCO hidden sectors is incomplete evidence and is a known defense attack. Must verify native max address (hdparm -N / identify) and either capture hidden areas or document their presence.; FOR-SECTOR-COMPLETENESS: No control proving the image covers the full reported device capacity. Must assert image byte count == blockdev --getsize64 of source (and account for last-sector / 4Kn vs 512e sector-size mismatch). dc3dd/dd can silently short-read; only a size/sector-count reconciliation proves completeness.; FOR-ERROR-SECTOR-POLICY: FOR-HASHLOG-ERRLOG captures the error log but no control defines the read-error HANDLING policy \u2014 bad sectors must be zero-padded (not skipped, which shifts all downstream offsets and invalidates the hash's evidentiary meaning) and the count/locations testified to. conv=noerror,sync semantics for dc3dd must be pinned.; FOR-SOURCE-IDENTITY: No control capturing the source device's own identity metadata (model, serial, firmware, capacity via hdparm -I / smartctl / udevadm). 'source description/serial' is hand-waved into FOR-COC-LOG but there is no automated capture from the device itself \u2014 examiner-typed serials are impeachable; the device-reported serial is the anchor.; FOR-DESTINATION-WIPE: No control requiring the destination/target media be forensically wiped and its pre-wipe state verified (zeroed + verification hash) before the image is written. Residual data on target media contaminates the exhibit and is classic cross-examination material.; FOR-CLOCK-TRUST: FOR-UTC-TZ records timestamps but no control establishes the trustworthiness of the host clock (NTP sync status, drift, offset to a trusted source). RFC 3161 timestamping is mentioned as 'optional' in the summary but there is no control for it, and an untrusted local clock undermines every logged time.; FOR-LOG-INTEGRITY: The (truncated) FOR-CONTEMP-LOG aims at an append-only log, but there is no control hashing/signing the custody log ITSELF, nor the error/hash logs. An unsigned append-only file is trivially editable; the log must be sealed with the same GPG-signature/timestamp rigor as the image, or chained (per-entry hash).; FOR-KEY-PROVENANCE: The summary's tamper-evident sealing uses 'GPG detached signature' but no control governs the signing key's provenance, fingerprint recording, key trust/expiry, or where the private key lives. A signature from an unattested key proves nothing about examiner identity.; FOR-AIR-GAP-NETWORK: Summary cites RFC 3227 step 'network' but no control addresses isolating/documenting network state, disabling auto-mount/udev/indexing daemons (udisks, Spotlight-equiv, journald replay triggers) on the acquisition host that can touch the source before write-blocking engages.; FOR-DUPLICATE-IMAGE: Best practice (SWGDE/ISO 27037) is a working copy plus an archival master; no control requires two images or distinguishes the sealed master from the analysis copy.; FOR-LEGAL-AUTHORITY-GATE: FOR-COC-LOG records 'why (case#, warrant/consent)' as a field, but there is no control that the script cannot proceed without an authority value \u2014 scope/authority should be a hard gate, not a log field, to prevent over-seizure.; FOR-PHOTO-SCENE: The summary calls a missing photograph 'impeachment material' but there is no actual control for photographic documentation of the device/labels/connections \u2014 it is referenced only rhetorically.\nAuditor corrections: FOR-PRE-HASH-SRC is overstated as universal. You cannot meaningfully pre-hash a LIVE running system's disk that is still mounted rw, and you cannot pre-hash volatile RAM at all. The pre-image-equals-source proof only holds for a powered-off, write-blocked source. For live acquisitions the control must be reframed (hash the source through the write-blocker AFTER blocking, and acknowledge live-system limitations), otherwise the 'anchor of the entire integrity chain' claim is false for an entire acquisition class the standard (NIST 800-86) covers.; FOR-RO-MOUNT lists 'noload' as a general mount option \u2014 it is ext3/ext4-specific (suppresses journal replay). For XFS the equivalent is 'norecovery'; for NTFS-3G it is different again. The check/fix would wrongly fail valid XFS/NTFS RO mounts and would fail to actually suppress recovery on non-ext filesystems. Filesystem-aware option selection is required.; FOR-DUAL-HASH frames sha256+sha512 as 'two INDEPENDENT hash algorithms from different design families.' SHA-256 and SHA-512 are the SAME family (both SHA-2, same Merkle-Damgard construction, differing mainly in word size/round constants). They are NOT independent in the cryptographic sense the rationale claims; a structural break in SHA-2 could affect both. For genuine independence pair SHA-256 with SHA3-256/BLAKE2. The dual-hash control is still useful for guarding against transcription/storage error, but the stated cryptographic-independence rationale is incorrect.; FOR-DUAL-HASH / FOR-VERIFY-COMPARE: re-running a SECOND independent hashing pass over the source to get the second algorithm means reading the source twice. The rationale should note both digests are normally computed in a SINGLE pass by the imager (dc3dd hash=sha256 hash=sha512) to avoid a second source read and any divergence window \u2014 the 'run a second independent hashing pass' fix invites a re-read of evidence that the verify step then can't distinguish from drift.; FOR-WRITEBLOCK: 'blockdev --setro' is necessary but NOT sufficient as a software write-block \u2014 it sets a kernel block-layer RO flag that udev/filesystem auto-mount can race or that some drivers ignore, and it does not stop a controller-level write. The rubric correctly calls hardware the gold standard but should not present --setro as a reliable software 'floor' without also blocking auto-mount and noting its limitations; ISO 27037 does not bless setro alone.; FOR-SOUND-IMAGER: 'bare dd silently zero-fills or aborts on read errors' is imprecise. Stock dd ABORTS on read error by default; it only zero-fills/pads when conv=sync,noerror is given. The real Daubert problem with bare dd is the absence of inline hashing and error logging, not an inherent silent zero-fill. State the mechanism correctly or the examiner gets impeached on the misstatement.; Environment/automatable mismatch: many controls are marked automatable:true but depend on interactive examiner input (write-blocker make/model/serial attestation, examiner credentials, warrant/authority, photographs). Those are at best semi-automatable (prompt-and-record); labeling them fully automatable overstates what the engine's deterministic_transforms can guarantee without a human in the loop.; FRE 902(13)/(14) citation in FOR-POST-HASH-IMG is slightly miscast: 902(13)/(14) self-authentication requires a certification by a QUALIFIED PERSON (a records/process certificate), not merely the presence of a re-computable hash. The hash enables the certification but does not by itself satisfy 902(14); a control for the written certification itself is missing.",
+  "references": [
+    "NIST SP 800-86 \u2014 Guide to Integrating Forensic Techniques into Incident Response",
+    "NIST SP 800-101 Rev.1 \u2014 Guidelines on Mobile Device Forensics",
+    "ACPO Good Practice Guide for Digital Evidence (4 principles)",
+    "SWGDE Best Practices for Computer Forensic Acquisitions / Digital Evidence Imaging",
+    "ISO/IEC 27037:2012 \u2014 Identification, collection, acquisition and preservation of digital evidence",
+    "RFC 3227 \u2014 Guidelines for Evidence Collection and Archiving (order of volatility)",
+    "RFC 3161 \u2014 Internet X.509 PKI Time-Stamp Protocol (TSP)",
+    "Federal Rules of Evidence 901 (authentication) and 902(13)/(14) (self-authentication of electronic records)",
+    "Daubert v. Merrell Dow Pharmaceuticals, 509 U.S. 579 (1993) \u2014 reliability/reproducibility factors",
+    "NIST CFTT \u2014 Computer Forensics Tool Testing (dd/dc3dd/imaging tool validation)",
+    "dc3dd and dcfldd documentation (inline hashing, hashlog, error logging)",
+    "libewf / ewfacquire / ewfverify documentation (E01 metadata + verification)",
+    "LiME (Linux Memory Extractor) and AVML \u2014 volatile memory acquisition"
+  ],
+  "controls": [
+    {
+      "id": "FOR-PRE-HASH-SRC",
+      "title": "Pre-acquisition hash of the SOURCE device (baseline integrity)",
+      "severity": "critical",
+      "rationale": "FRE 901(b)(9)/Daubert require proof the image equals the original. Without a hash of the live source BEFORE imaging, you can only prove the image matches itself, not that it matches the evidence. This baseline is the anchor of the entire integrity chain.",
+      "check": "Script computes at least one cryptographic hash of the raw source block device (e.g. sha256sum /dev/sdX or dc3dd hash output on the source) and records it to the custody log BEFORE the image is written. Grep for a hash of the source path that precedes the imaging command.",
+      "fix": "Insert a pre-image hashing step against the read-only source device and tee the digest into the chain-of-custody log with a UTC timestamp, before invoking the imager.",
+      "applies_to": "All disk/partition/logical acquisitions of physical or attached media.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-POST-HASH-IMG",
+      "title": "Post-acquisition hash of the resulting IMAGE",
+      "severity": "critical",
+      "rationale": "The image must carry its own independently re-computable fingerprint so any future copy can be proven identical to the seized artifact. Required for FRE 902(13)/(14) self-authentication of electronic records.",
+      "check": "After the imager exits, the script hashes the produced image file(s) (or reads the imager's hashlog) and writes the digest(s) to the custody log and a sidecar .sha256/.sha512 file.",
+      "fix": "Add a post-image hashing step that emits per-segment and whole-image digests into the log and a detached digest manifest.",
+      "applies_to": "All acquisitions producing an image file (raw/dd, E01/EWF, AFF4, segmented).",
+      "automatable": true
+    },
+    {
+      "id": "FOR-DUAL-HASH",
+      "title": "Two INDEPENDENT hash algorithms (sha256 + sha512; sha256+md5 only for legacy cross-verification)",
+      "severity": "critical",
+      "rationale": "A single algorithm is a single point of failure and a single point of attack. Two algorithms from different design families make an undetected collision computationally infeasible and pre-empt the 'MD5 is broken' cross-examination. SWGDE and modern courts expect at minimum SHA-256; MD5 is acceptable ONLY as a secondary legacy-compat check, never alone.",
+      "check": "Both source-hash and image-hash steps compute two algorithms. Confirm sha256 AND sha512 (preferred) appear; if md5 is present it must be alongside sha256, never standalone.",
+      "fix": "Configure the imager with two hash= directives (dc3dd hash=sha256 hash=sha512) or run a second independent hashing pass; reject configurations where MD5 is the only algorithm.",
+      "applies_to": "Every hashing step (pre and post).",
+      "automatable": true
+    },
+    {
+      "id": "FOR-VERIFY-COMPARE",
+      "title": "Explicit verification compare of source-hash vs image-hash with HARD FAIL on mismatch",
+      "severity": "critical",
+      "rationale": "Computing hashes is worthless without comparing them and stopping. A script that logs a mismatch but continues produces an exhibit the examiner cannot defend. The comparison and the abort ARE the proof of bit-for-bit fidelity.",
+      "check": "Script string-compares pre-source digest to post-image digest for BOTH algorithms and exits non-zero / aborts sealing if either differs. Grep for an equality test followed by an error exit. A logged-but-ignored mismatch fails this control.",
+      "fix": "Inject the dual-hash-verify wrapper that compares each algorithm and calls the fatal error handler on any inequality, preventing the seal/sign step from ever running on a non-verifying image.",
+      "applies_to": "All acquisitions.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-WRITEBLOCK",
+      "title": "Write-blocking of the source: hardware write-blocker attestation OR software RO enforcement",
+      "severity": "critical",
+      "rationale": "ACPO Principle 1 and ISO 27037 demand the original not be changed. A hardware write-blocker is the gold standard; where software-only, blockdev --setro plus verification is the floor. Any write to the source destroys authenticity.",
+      "check": "Either (a) a hardware write-blocker make/model/serial and self-test result is recorded in the log, or (b) blockdev --setro /dev/sdX is issued AND blockdev --getro confirms value 1 before any read. Absence of both fails.",
+      "fix": "Inject RO-enforcement: set the source RO, assert getro==1, and prompt/record the hardware write-blocker attestation line in the custody header.",
+      "applies_to": "Physical/attached source media (not applicable to pure live-memory capture).",
+      "automatable": true
+    },
+    {
+      "id": "FOR-RO-MOUNT",
+      "title": "Read-only, no-journal-replay, noatime mounting of any mounted source/loop",
+      "severity": "high",
+      "rationale": "Even 'read' mounts can write: ext journal replay and atime updates both modify the source. mount -o ro,noload,noatime (and loop devices created with --read-only) prevent silent source modification that a defense expert will surface.",
+      "check": "Any mount of the source or of the image-for-analysis uses ro,noload,noatime,nodev,noexec; any losetup uses --read-only. Plain 'mount' or rw loop devices fail.",
+      "fix": "Rewrite mount invocations to ro,noload,noatime,nodev,noexec and losetup to --read-only --find --show.",
+      "applies_to": "Cases where the source or image is mounted on the acquisition host.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-NO-ATIME",
+      "title": "No modification of source access/modify/change times",
+      "severity": "high",
+      "rationale": "Altered MAC times on the source are direct evidence of spoliation and are devastating on cross-examination. Combined with RO mount, this is the timestamp-integrity guarantee.",
+      "check": "All read paths against the source avoid atime updates (noatime mount, or reads only through the RO block device). No tool writes to the source filesystem.",
+      "fix": "Force noatime on mounts and route all reads through the raw RO block device rather than a writable filesystem view.",
+      "applies_to": "Source media handling.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-SOUND-IMAGER",
+      "title": "Use a forensically sound imager (dc3dd/dcfldd/ewfacquire), NOT bare dd",
+      "severity": "critical",
+      "rationale": "Bare dd has no inline hashing, no error logging, and silently zero-fills or aborts on read errors \u2014 producing an unverifiable, possibly-truncated image. dc3dd/dcfldd hash inline and log errors; ewfacquire writes E01 with embedded hashes+metadata. Tool choice is a core Daubert reliability factor.",
+      "check": "Imaging command is dc3dd, dcfldd, or ewfacquire/ewfacquire-equivalent. Any invocation of bare 'dd' for evidence acquisition fails.",
+      "fix": "Rewrite dd\u2192dc3dd preserving if=/of=/bs= and adding hash=, log=, hlog=, hashlog=, verb=on; or switch to ewfacquire for E01.",
+      "applies_to": "All disk/partition imaging.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-HASHLOG-ERRLOG",
+      "title": "Imager hashlog AND error/read-error log captured to file",
+      "severity": "high",
+      "rationale": "The hashlog is contemporaneous proof of the digest computed DURING acquisition (not after, when tampering is conceivable). The error log documents every unreadable sector \u2014 required to honestly testify about completeness.",
+      "check": "dc3dd hashlog=/hlog=/log= or dcfldd hashlog=/errlog= or ewfacquire -l logfile are present and the files are referenced in the custody log.",
+      "fix": "Add hashlog/log/errlog directives and register the produced log files in the evidence manifest.",
+      "applies_to": "All imaging.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-BITFORBIT-VERIFY",
+      "title": "Independent bit-for-bit verification pass of the image (ewfverify / re-hash whole image)",
+      "severity": "high",
+      "rationale": "A second, independent read-and-hash of the written image proves the storage medium did not corrupt the image after writing and that the embedded hash is reproducible \u2014 distinct from the acquisition-time hash.",
+      "check": "After imaging, an independent verification runs (ewfverify for E01, or a fresh sha256/sha512 over the raw image) and its result is compared to the acquisition hash with hard-fail.",
+      "fix": "Inject a post-write verification pass (ewfverify or re-hash) feeding into the verify-compare/hard-fail gate.",
+      "applies_to": "All acquisitions.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-COC-LOG",
+      "title": "Chain-of-custody log: who/what/when/where/why, fully attributed",
+      "severity": "critical",
+      "rationale": "FRE 901 authentication is ultimately a human testifying to provenance. The custody log is that testimony's contemporaneous backbone. Missing the 5 Ws or examiner attribution breaks the chain and invites exclusion.",
+      "check": "A custody record captures: examiner name+organization+credentials, evidence ID, source description/serial, location (where), purpose/authority (why \u2014 case#, warrant/consent), and the action performed (what). All six dimensions present.",
+      "fix": "Inject the chain-of-custody header capture block that prompts for/records all five Ws plus examiner identity and writes them to the append-only log.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-COC-EXAMINER",
+      "title": "Examiner identity + organization + credentials recorded",
+      "severity": "high",
+      "rationale": "Daubert qualification of the witness and FRE 901 attribution both require the acquiring examiner be identified and qualified on the record at acquisition time, not reconstructed later.",
+      "check": "Custody header contains examiner full name, org, and credential/cert reference (e.g. GCFA/EnCE/role).",
+      "fix": "Add examiner name/org/credentials fields to the custody header capture.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-EVIDENCE-ID",
+      "title": "Unique evidence/exhibit identifier assigned and stamped on every artifact",
+      "severity": "high",
+      "rationale": "Every image, hash file, log, and photo must trace to one immutable evidence ID so exhibits cannot be confused or substituted. ISO 27037 unique identifier requirement.",
+      "check": "A single EVIDENCE_ID variable is generated/required and embedded in image filenames, log entries, and the manifest.",
+      "fix": "Generate or require an evidence ID and propagate it into all output filenames and log lines.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-UTC-TZ",
+      "title": "All timestamps in UTC with explicit timezone offset",
+      "severity": "high",
+      "rationale": "Ambiguous local timestamps (DST, traveling examiner) are routinely impeached. UTC with explicit offset (ISO 8601) makes the timeline unassailable and correlatable across exhibits.",
+      "check": "Every logged timestamp uses date -u with ISO 8601 / explicit +00:00 (or records local time WITH offset). Naive local times fail.",
+      "fix": "Replace all timestamp generation with date -u +%Y-%m-%dT%H:%M:%SZ and record the host clock source.",
+      "applies_to": "All logging.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-TOOL-VERSION",
+      "title": "Tool name + exact version recorded for every tool used",
+      "severity": "high",
+      "rationale": "Daubert reliability and reproducibility require knowing precisely which build of dc3dd/ewfacquire/gpg produced the evidence; behavior and bugs differ across versions.",
+      "check": "Script records --version (or equivalent) of every forensic tool into the log before use.",
+      "fix": "Inject a tool-version capture block that logs name+version for the imager, hashers, gpg, and OS/kernel.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-CMDLINE-RECORD",
+      "title": "Exact command line(s) executed recorded verbatim",
+      "severity": "high",
+      "rationale": "Reproducibility (Daubert) and transparency require the precise commands, flags, and parameters be on the record so the process can be independently repeated and audited.",
+      "check": "The full invocation of each acquisition/hash/seal command is echoed to the log (e.g. via set -x to the log, or explicit echo of the command string).",
+      "fix": "Tee a record of each command (BASH_COMMAND / set -x routed to the log) into the custody log.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-CONTEMP-LOG",
+      "title": "Contemporaneous logging to an APPEND-ONLY / tee'd log",
+      "severity": "high",
+      "rationale": "ACPO contemporaneous-notes principle: records made during the act carry far more evidentiary weight than after-the-fact reconstruction. Append-only (chattr +a or tee to write-once) prevents retroactive edits that would taint the whole record.",
+      "check": "All output is tee'd to a log opened in append mode; ideally the log file is set append-only (chattr +a) or written to WORM media. Truncating/overwriting the log fails.",
+      "fix": "Route stdout/stderr through tee -a to a per-case log, set it append-only where supported, and never open it with > truncation.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-VOLATILITY-ORDER",
+      "title": "Non-destructive ordering per RFC 3227 order of volatility (memory \u2192 network \u2192 disk)",
+      "severity": "high",
+      "rationale": "Volatile data vanishes if you image disk first. RFC 3227 / NIST SP 800-86 mandate capturing most-volatile evidence first: RAM (LiME/AVML), then network state (connections, routing, ARP), then non-volatile disk. Wrong order = irrecoverable evidence loss and a spoliation argument.",
+      "check": "If the script captures volatile state at all, memory capture precedes network-state capture which precedes disk imaging. A script imaging disk before grabbing RAM (when RAM is in scope) fails.",
+      "fix": "Reorder phases: LiME/AVML memory dump \u2192 network/process/ARP/routing snapshot \u2192 disk image; gate disk imaging behind completion of volatile capture.",
+      "applies_to": "Live-system / hybrid acquisitions where the host is powered on.",
+      "automatable": false
+    },
+    {
+      "id": "FOR-MEMORY-CAPTURE",
+      "title": "Volatile memory captured with a sound tool (LiME/AVML) and immediately hashed",
+      "severity": "high",
+      "rationale": "RAM holds keys, malware, and process state unavailable post-shutdown. It must be captured with a documented tool to a non-source target and hashed at once, because it cannot be re-acquired or independently re-verified against an original.",
+      "check": "Memory acquisition uses LiME or AVML (not cat /dev/mem hacks), writes to non-source media, and is dual-hashed immediately.",
+      "fix": "Add a LiME/AVML capture step writing to the sterile target, then dual-hash and log the dump as its own evidence item.",
+      "applies_to": "Powered-on systems in scope for memory.",
+      "automatable": false
+    },
+    {
+      "id": "FOR-NETWORK-STATE",
+      "title": "Network/runtime state snapshot before disk imaging",
+      "severity": "medium",
+      "rationale": "Active connections, listening sockets, routing/ARP, loaded modules, and process trees are volatile context that corroborate the disk image and are lost on shutdown (RFC 3227).",
+      "check": "For live hosts, the script records ss/netstat, ip route, arp, ps, lsmod (or equivalent) to logged, hashed output before disk capture.",
+      "fix": "Insert a volatile-state collection phase (connections, routing, processes, modules) writing hashed output to the evidence set, ordered after memory and before disk.",
+      "applies_to": "Powered-on systems.",
+      "automatable": false
+    },
+    {
+      "id": "FOR-SEAL-SIGN",
+      "title": "Evidence sealing: tar + DETACHED GPG signature over the evidence set",
+      "severity": "high",
+      "rationale": "A cryptographic detached signature binds the examiner's key to the exact bytes of the image+log+hashes at seal time, making post-seal tampering detectable and supporting FRE 902(13)/(14) self-authentication.",
+      "check": "Final step packages image+hashes+logs (e.g. tar) and produces gpg --detach-sign --armor output; the signing key fingerprint is recorded in the log.",
+      "fix": "Inject the GPG-seal block: tar the evidence set, detach-sign with the examiner key, record the key fingerprint, and gate this behind successful hash verification.",
+      "applies_to": "Every acquisition, after verification passes.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-RFC3161-TSA",
+      "title": "Optional RFC 3161 trusted timestamp on the seal",
+      "severity": "medium",
+      "rationale": "A trusted timestamp authority proves the evidence existed and was sealed at/before a specific time independent of the examiner's clock \u2014 defeats 'you backdated it' challenges. Optional but strengthens 902 self-authentication.",
+      "check": "If TSA is configured, an openssl ts -query/-reply (or equivalent) is produced over the sealed archive's hash and stored with the evidence.",
+      "fix": "Add an openssl ts RFC 3161 request over the sealed tar's sha512 and store the timestamp token alongside the signature.",
+      "applies_to": "High-stakes cases / where a TSA is available.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-PHOTOS-SERIALS",
+      "title": "Photographs and serial numbers of the source device and connections",
+      "severity": "medium",
+      "rationale": "Photos of the device, label, serial, and write-blocker wiring establish physical provenance and corroborate the evidence ID \u2014 standard SWGDE/ISO 27037 documentation; their absence is impeachment fodder.",
+      "check": "Custody record references captured photographs and the device serial/model/asset tag.",
+      "fix": "Add fields and a prompt to record photo filenames and device serial/model into the custody header.",
+      "applies_to": "Physical media seizure.",
+      "automatable": false
+    },
+    {
+      "id": "FOR-STERILE-TARGET",
+      "title": "Target/destination media wiped and verified sterile before use",
+      "severity": "high",
+      "rationale": "Residual data on the target can cross-contaminate the new image and lets the defense argue the exhibit contains foreign data. ISO 27037 requires verified-sterile destination media. Must be a DIFFERENT device than the source.",
+      "check": "Target is wiped (e.g. zero/blkdiscard) and verified (hash of wiped target == all-zero pattern, or documented sterilization) BEFORE imaging; target != source path is asserted.",
+      "fix": "Inject a target-sterility check: assert target!=source, wipe, verify the wipe, and log the sterilization result before imaging.",
+      "applies_to": "All acquisitions writing to reusable media.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-SET-EUO-TRAP",
+      "title": "set -euo pipefail + ERR trap: abort on ANY error, fail loudly",
+      "severity": "critical",
+      "rationale": "Silent partial failure is the single biggest threat to a forensic script: a failed hash, a short read, or a missing tool that does not stop execution yields an exhibit the examiner cannot defend. Strict mode + trap turns every error into a logged, fatal, non-zero exit.",
+      "check": "Script begins with set -euo pipefail and installs a trap on ERR/EXIT that logs the failing command+line and exits non-zero. Absence fails.",
+      "fix": "Inject set -euo pipefail and an ERR trap that records BASH_COMMAND, line number, and UTC time to the log then exits non-zero, aborting any downstream seal.",
+      "applies_to": "Every acquisition script.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-IDEMPOTENT",
+      "title": "Idempotency / no clobber of existing evidence outputs",
+      "severity": "medium",
+      "rationale": "Re-running must never silently overwrite an existing image, log, or signature \u2014 that destroys prior evidence and breaks custody continuity.",
+      "check": "Script refuses to overwrite existing evidence files (tests for existence and aborts, or writes to a unique evidence-ID/timestamp namespace).",
+      "fix": "Guard all output paths with existence checks that abort, and namespace outputs by evidence ID + UTC timestamp.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-REPRO-STATEMENT",
+      "title": "Reproducibility statement emitted (how to independently re-verify)",
+      "severity": "medium",
+      "rationale": "Daubert favors methods that others can reproduce. A machine-readable statement of tools, versions, commands, and the exact verification command lets any third party re-derive the hashes and confirm integrity.",
+      "check": "Script writes a reproducibility/method statement (tools+versions+commands+verify instructions) into the evidence set.",
+      "fix": "Emit a method-statement file enumerating tool versions, command lines, hashes, and the one command a third party runs to re-verify.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-SEGMENTED",
+      "title": "Segmented image option for large media / FAT target constraints",
+      "severity": "low",
+      "rationale": "Single monolithic images can exceed filesystem limits (FAT32 4GB) or be unwieldy; segmenting (E01 chunks or dd split with per-segment hashes) preserves portability without weakening integrity if each segment is hashed.",
+      "check": "For large acquisitions, the imager supports/uses segmentation (ewfacquire segment size, or split with per-part hashing) and each segment is hashed.",
+      "fix": "Enable segment-size on ewfacquire or split output with per-segment dual hashes recorded in the manifest.",
+      "applies_to": "Large media or constrained target filesystems.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-BADBLOCK",
+      "title": "Bad-block / read-error handling documented (no silent skipping)",
+      "severity": "high",
+      "rationale": "Failing/aged drives have unreadable sectors. The imager must continue past errors WHILE logging each one and padding deterministically (conv=noerror,sync / dc3dd) \u2014 never silently drop sectors, which would make the image unrepresentative and the hash undefendable.",
+      "check": "Imager configured to continue on read errors with error logging and deterministic padding (dc3dd default or dcfldd conv=noerror,sync), and the error log is part of the evidence. Bare dd that aborts or silently skips fails.",
+      "fix": "Configure dc3dd/dcfldd error logging + sync padding and register the read-error log in the manifest; testify to error count from the log.",
+      "applies_to": "All disk imaging, especially aged/failing media.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-MANIFEST",
+      "title": "Single signed manifest binding every artifact to its dual hashes",
+      "severity": "medium",
+      "rationale": "A manifest enumerating each evidence file with both digests, signed once, lets the court verify the complete set's integrity from one authenticated document rather than ad hoc sidecar files.",
+      "check": "A manifest file lists every produced artifact (image segments, logs, photos, memory dump) with sha256+sha512, and it is the object that gets GPG-signed.",
+      "fix": "Generate a manifest of all artifacts with dual hashes and make it the signing target for the GPG seal.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-CASE-METADATA",
+      "title": "Case metadata embedded in the image container (E01 case/evidence/examiner fields)",
+      "severity": "medium",
+      "rationale": "E01/EWF can store case number, evidence number, examiner, and description INSIDE the container, binding metadata to the image itself rather than only an external log \u2014 strengthens self-authentication.",
+      "check": "ewfacquire invoked with -C case -E evidence -e examiner -D description -N notes (or AFF4 equivalent) populated from the custody header.",
+      "fix": "Pass case/evidence/examiner/description/notes into ewfacquire from the custody variables when E01 format is used.",
+      "applies_to": "E01/AFF4 acquisitions.",
+      "automatable": true
+    },
+    {
+      "id": "FOR-CLOCK-SOURCE",
+      "title": "Acquisition host clock source and drift recorded",
+      "severity": "low",
+      "rationale": "Because timestamps anchor the timeline, the trustworthiness of the host clock (NTP-synced? offset?) should be on the record to pre-empt challenges to every logged time.",
+      "check": "Script records clock sync status/offset (e.g. timedatectl / chronyc tracking / ntpstat) at start.",
+      "fix": "Capture clock source and drift into the custody header at script start.",
+      "applies_to": "Every acquisition.",
+      "automatable": true
+    }
+  ],
+  "deterministic_transforms": [
+    {
+      "id": "DT-STRICT-TRAP",
+      "description": "Enforce abort-on-any-error and a contemporaneous failure record. Adds strict mode and an ERR/EXIT trap that logs the exact failing command, line number, and UTC time, then exits non-zero so no downstream seal/sign can run on a broken acquisition. Satisfies FOR-SET-EUO-TRAP and feeds FOR-CMDLINE-RECORD.",
+      "trigger": "Always, as the first injected block at the top of any acquisition script (after the shebang).",
+      "implementation": "set -Eeuo pipefail\nIFS=$'\\n\\t'\n: \"${COC_LOG:?COC_LOG (chain-of-custody log path) must be set}\"\n_log(){ printf '%s %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$*\" | tee -a \"$COC_LOG\" >&2; }\n_fatal(){ _log \"FATAL line:${BASH_LINENO[0]:-?} cmd:[${BASH_COMMAND}] rc:$?\"; _log 'ABORT: acquisition not verified \u2014 DO NOT use output as evidence'; exit 1; }\ntrap _fatal ERR\ntrap '_log \"EXIT rc:$?\"' EXIT\n# record every command verbatim to the log\nexport PS4='+ $(date -u +%H:%M:%SZ) ${BASH_SOURCE}:${LINENO}: '\nexec 19>>\"$COC_LOG\"; export BASH_XTRACEFD=19; set -x",
+      "placement": "Top of script, immediately after shebang; before any other logic. Must precede all other injected blocks."
+    },
+    {
+      "id": "DT-COC-HEADER",
+      "description": "Capture the chain-of-custody header (5 Ws + examiner identity + clock source + tool versions) to the append-only log before any acquisition. Satisfies FOR-COC-LOG, FOR-COC-EXAMINER, FOR-EVIDENCE-ID, FOR-UTC-TZ, FOR-TOOL-VERSION, FOR-CLOCK-SOURCE, FOR-CONTEMP-LOG.",
+      "trigger": "Always, immediately after the strict/trap block and before any read of the source.",
+      "implementation": "# --- Chain of custody header (required vars hard-fail if unset) ---\n: \"${EXAMINER:?examiner full name}\"; : \"${EXAMINER_ORG:?examiner org}\"; : \"${EXAMINER_CREDS:?examiner credentials/cert}\"\n: \"${EVIDENCE_ID:?unique evidence/exhibit id}\"; : \"${CASE_NUMBER:?case number / legal authority}\"\n: \"${LOCATION:?acquisition location}\"; : \"${PURPOSE:?why \u2014 warrant/consent/IR scope}\"\n: \"${SOURCE_DESC:?source device description/serial}\"\ntouch \"$COC_LOG\"; chattr +a \"$COC_LOG\" 2>/dev/null || _log 'WARN: append-only (chattr +a) unavailable on this fs'\n_log '===== CHAIN OF CUSTODY ====='\n_log \"WHO     examiner=$EXAMINER org=$EXAMINER_ORG creds=$EXAMINER_CREDS\"\n_log \"WHAT    evidence_id=$EVIDENCE_ID source=$SOURCE_DESC\"\n_log \"WHEN    start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n_log \"WHERE   location=$LOCATION host=$(hostname) kernel=$(uname -a)\"\n_log \"WHY     case=$CASE_NUMBER purpose=$PURPOSE\"\n_log \"CLOCK   $(timedatectl 2>/dev/null | tr '\\n' ';' || chronyc tracking 2>/dev/null | tr '\\n' ';' || echo 'no-sync-info')\"\n_log \"WBLOCK  hardware_write_blocker=${WRITE_BLOCKER:-NONE-software-RO} attest=${WRITE_BLOCKER_SERIAL:-n/a}\"\n_log \"PHOTOS  ${PHOTOS:-NONE-RECORDED}\"\nfor t in dc3dd dcfldd ewfacquire ewfverify gpg sha256sum sha512sum losetup blockdev openssl; do \\\n  v=$(command -v \"$t\" >/dev/null 2>&1 && { \"$t\" --version 2>&1 | head -1; } || echo MISSING); _log \"TOOL    $t = $v\"; done\n_log '==========================='",
+      "placement": "After DT-STRICT-TRAP, before any source access (FOR-WRITEBLOCK / imaging)."
+    },
+    {
+      "id": "DT-RO-ENFORCE",
+      "description": "Enforce read-only on the source and assert it before any read. Sets the block device RO, verifies getro==1, asserts target!=source, and converts any source mount to ro,noload,noatime. Satisfies FOR-WRITEBLOCK (software path), FOR-RO-MOUNT, FOR-NO-ATIME, FOR-STERILE-TARGET (assertion part).",
+      "trigger": "When a physical/attached source block device is acquired (presence of SOURCE_DEV).",
+      "implementation": ": \"${SOURCE_DEV:?source block device e.g. /dev/sdX}\"\n[ -b \"$SOURCE_DEV\" ] || _fatal\n[ \"${TARGET_DEV:-/dev/null}\" != \"$SOURCE_DEV\" ] || { _log 'FATAL target==source'; exit 1; }\nblockdev --setro \"$SOURCE_DEV\" || _fatal\nif [ \"$(blockdev --getro \"$SOURCE_DEV\")\" != \"1\" ]; then _log 'FATAL source NOT read-only'; exit 1; fi\n_log \"RO-ENFORCED $SOURCE_DEV getro=1\"\n# if anything must be loop-mounted for analysis, force RO + no journal replay + noatime\nro_loop(){ losetup --read-only --find --show \"$1\"; }\nro_mount(){ mount -o ro,noload,noatime,nodev,noexec \"$1\" \"$2\"; }",
+      "placement": "After DT-COC-HEADER, before DT-DD-TO-DC3DD."
+    },
+    {
+      "id": "DT-DD-TO-DC3DD",
+      "description": "Rewrite bare dd into dc3dd with dual inline hashing, error logging, and a separate hashlog \u2014 and capture the SOURCE pre-image hash in the same pass. Satisfies FOR-SOUND-IMAGER, FOR-HASHLOG-ERRLOG, FOR-PRE-HASH-SRC, FOR-DUAL-HASH (acquisition side), FOR-BADBLOCK, FOR-CMDLINE-RECORD.",
+      "trigger": "Any line matching bare dd evidence acquisition: dd if=<source> of=<image> (regex: ^\\s*dd\\s+if=.*of=.*).",
+      "implementation": "# BEFORE:  dd if=$SOURCE_DEV of=$IMAGE bs=4M\n# AFTER (engine-injected):\nIMAGE=\"${IMAGE:?output image path}\"\n[ -e \"$IMAGE\" ] && { _log \"FATAL refuse to clobber $IMAGE\"; exit 1; }\ndc3dd if=\"$SOURCE_DEV\" of=\"$IMAGE\" \\\n  hash=sha256 hash=sha512 \\\n  hashlog=\"${IMAGE}.hashlog\" \\\n  log=\"${IMAGE}.dc3dd.log\" \\\n  hashconv=after verb=on \\\n  bs=4M 2>&1 | tee -a \"$COC_LOG\"\n# dc3dd computes the source-read hash inline -> that IS the pre-acquisition source hash\nawk '/sha256/||/sha512/' \"${IMAGE}.hashlog\" | tee -a \"$COC_LOG\"\n_log \"PRE-HASH(source via dc3dd) recorded in ${IMAGE}.hashlog\"",
+      "placement": "Replaces the matched dd invocation in place. (For E01: emit ewfacquire -C \"$CASE_NUMBER\" -E \"$EVIDENCE_ID\" -e \"$EXAMINER\" -d sha256 -l \"${IMAGE}.ewf.log\" -t \"$IMAGE\" \"$SOURCE_DEV\" instead \u2014 see DT-CASE-META.)"
+    },
+    {
+      "id": "DT-DUAL-HASH-VERIFY",
+      "description": "Compute dual hashes of the produced image independently and HARD-FAIL unless both match the acquisition-time (source) hashes from the imager's hashlog. This is the bit-for-bit verification gate that everything downstream depends on. Satisfies FOR-POST-HASH-IMG, FOR-DUAL-HASH, FOR-VERIFY-COMPARE, FOR-BITFORBIT-VERIFY.",
+      "trigger": "Always, immediately after the imaging step and before sealing.",
+      "implementation": "verify_dual(){\n  local img=\"$1\" hl=\"$2\"\n  local s256_img s512_img s256_src s512_src\n  s256_img=$(sha256sum \"$img\" | awk '{print $1}')\n  s512_img=$(sha512sum \"$img\" | awk '{print $1}')\n  s256_src=$(grep -iE 'sha256' \"$hl\" | grep -oiE '[0-9a-f]{64}' | head -1)\n  s512_src=$(grep -iE 'sha512' \"$hl\" | grep -oiE '[0-9a-f]{128}' | head -1)\n  printf '%s  %s\\n' \"$s256_img\" \"$img\" > \"${img}.sha256\"\n  printf '%s  %s\\n' \"$s512_img\" \"$img\" > \"${img}.sha512\"\n  _log \"VERIFY sha256 src=$s256_src img=$s256_img\"\n  _log \"VERIFY sha512 src=$s512_src img=$s512_img\"\n  [ -n \"$s256_src\" ] && [ \"$s256_src\" = \"$s256_img\" ] || { _log 'FATAL sha256 MISMATCH \u2014 image NOT verified'; exit 1; }\n  [ -n \"$s512_src\" ] && [ \"$s512_src\" = \"$s512_img\" ] || { _log 'FATAL sha512 MISMATCH \u2014 image NOT verified'; exit 1; }\n  _log 'VERIFY PASS: dual-hash bit-for-bit match (sha256 & sha512)'\n}\nverify_dual \"$IMAGE\" \"${IMAGE}.hashlog\"\n# E01 path additionally: ewfverify -d sha256 \"$IMAGE\" 2>&1 | tee -a \"$COC_LOG\" || { _log 'FATAL ewfverify failed'; exit 1; }",
+      "placement": "After DT-DD-TO-DC3DD, before DT-SEAL. Acts as the gate: seal is unreachable unless this passes."
+    },
+    {
+      "id": "DT-STERILE-TARGET",
+      "description": "Wipe and verify the destination media sterile before imaging, proving no cross-contamination. Satisfies FOR-STERILE-TARGET.",
+      "trigger": "When TARGET_DEV (reusable destination block device) is provided and WIPE_TARGET=1.",
+      "implementation": "if [ \"${WIPE_TARGET:-0}\" = 1 ]; then\n  : \"${TARGET_DEV:?target device to sterilize}\"\n  [ \"$TARGET_DEV\" != \"$SOURCE_DEV\" ] || { _log 'FATAL target==source'; exit 1; }\n  _log \"STERILIZE wiping $TARGET_DEV\"\n  blkdiscard -f \"$TARGET_DEV\" 2>/dev/null || dd if=/dev/zero of=\"$TARGET_DEV\" bs=4M status=progress\n  # verify sterile: hash a sample must equal hash of equivalent zeroes\n  sample=$(dd if=\"$TARGET_DEV\" bs=1M count=64 2>/dev/null | sha256sum | awk '{print $1}')\n  zeros=$(dd if=/dev/zero bs=1M count=64 2>/dev/null | sha256sum | awk '{print $1}')\n  [ \"$sample\" = \"$zeros\" ] || { _log 'FATAL target not sterile after wipe'; exit 1; }\n  _log 'STERILE: target verified zeroed'\nfi",
+      "placement": "After DT-RO-ENFORCE, before DT-DD-TO-DC3DD."
+    },
+    {
+      "id": "DT-SEAL",
+      "description": "Build the signed manifest, tar the evidence set, detach-sign with the examiner GPG key, and optionally apply an RFC 3161 trusted timestamp. Reachable ONLY after DT-DUAL-HASH-VERIFY passes. Satisfies FOR-MANIFEST, FOR-SEAL-SIGN, FOR-RFC3161-TSA, FOR-REPRO-STATEMENT.",
+      "trigger": "Always, as the final step, after verification has passed.",
+      "implementation": ": \"${GPG_KEY:?examiner signing key id/fingerprint}\"\nBUNDLE=\"${EVIDENCE_ID}_$(date -u +%Y%m%dT%H%M%SZ)\"\n# manifest: every artifact with dual hashes\n{ echo \"# evidence manifest $EVIDENCE_ID case $CASE_NUMBER examiner $EXAMINER\";\n  for f in \"$IMAGE\"* \"$COC_LOG\"; do [ -f \"$f\" ] && printf '%s  %s  %s\\n' \"$(sha256sum \"$f\"|awk '{print $1}')\" \"$(sha512sum \"$f\"|awk '{print $1}')\" \"$f\"; done; } > \"${BUNDLE}.manifest\"\n# reproducibility statement\n{ echo 'REPRODUCE: sha256sum -c and sha512sum -c the manifest; gpg --verify the .asc; dc3dd/ewfverify versions in COC log.';\n  echo \"verify_cmd: gpg --verify ${BUNDLE}.tar.asc ${BUNDLE}.tar && sha256sum -c <(awk '{print \\$1\\\"  \\\"\\$3}' ${BUNDLE}.manifest)\"; } > \"${BUNDLE}.reproduce.txt\"\ntar --sort=name --owner=0 --group=0 -cf \"${BUNDLE}.tar\" \"${BUNDLE}.manifest\" \"${BUNDLE}.reproduce.txt\" \"$IMAGE\"* \"$COC_LOG\"\ngpg --batch --yes --local-user \"$GPG_KEY\" --armor --detach-sign --output \"${BUNDLE}.tar.asc\" \"${BUNDLE}.tar\" || _fatal\n_log \"SEALED ${BUNDLE}.tar signed-by $(gpg --fingerprint \"$GPG_KEY\" 2>/dev/null | sed -n 2p | tr -d ' ')\"\nif [ \"${TSA_URL:-}\" != \"\" ]; then\n  openssl ts -query -data \"${BUNDLE}.tar\" -sha512 -cert -out \"${BUNDLE}.tsq\" && \\\n  curl -s -H 'Content-Type: application/timestamp-query' --data-binary @\"${BUNDLE}.tsq\" \"$TSA_URL\" -o \"${BUNDLE}.tsr\" && \\\n  _log \"RFC3161 timestamp obtained ${BUNDLE}.tsr from $TSA_URL\"\nfi\n_log 'ACQUISITION COMPLETE \u2014 verified & sealed'",
+      "placement": "Final block of the script, gated behind successful DT-DUAL-HASH-VERIFY."
+    }
+  ]
+}

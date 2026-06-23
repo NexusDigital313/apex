@@ -1,0 +1,502 @@
+{
+  "domain": "cis_hardening",
+  "target_standard": "DISA STIG (DoD/courtroom grade) for RHEL/Rocky/AlmaLinux 8 & 9 and Canonical Ubuntu 20.04/22.04 LTS, derived from the General Purpose OS SRG (GPOS-SRG). Maps to STIG IDs (RHEL-08-*, RHEL-09-*, UBTU-20-*, UBTU-22-*), legacy V-IDs, CCIs, and CAT I/II/III severity.",
+  "summary": "CIS Level 1/2 gets you most of the file-permission, service-disable, and basic-sysctl coverage that STIG also wants, so those are NOT repeated here. This rubric is the STIG-only DELTA: the requirements a CIS-baselined box still fails. The big buckets STIG adds beyond CIS are (1) FIPS 140-2/140-3 validated crypto enforced end-to-end \u2014 kernel fips=1, system-wide crypto-policy FIPS, and SSH ciphers/MACs/KEX restricted to the DoD-approved FIPS set, which is STRICTER and DIFFERENT from CIS's \"strong cipher\" lists; (2) the exact DoD Standard Mandatory Notice and Consent banner verbatim on SSH/console/GUI; (3) the full STIG audit.rules superset (privileged-command auid auditing, time-change, identity, MAC-policy, perm-mod, mounts, delete, modules, sudo, plus immutable -e 2 and -f 2 failure mode); (4) account-lockout with even_deny_root and admin-only unlock (unlock_time=0), 60-day password max age, 24-password history, FIPS-strength pwquality; (5) GRUB superuser password, USBGuard peripheral control, removable-media noexec, and authenticated time sync. Severity skews CAT II with a handful of CAT I items (FIPS off, no banner where consent is legally required, SSH root login, world-writable audit). Everything below is distro-aware (dnf/apt, pam stack layout, crypto-policy vs faillock.conf differences between RHEL 8/9 and Ubuntu) and the deterministic_transforms are idempotent shell the engine can inject directly. Two caveats the engine must respect: enabling FIPS (fips-mode-setup) and adding nodev/nosuid/noexec mount options or installing GRUB passwords are reboot-affecting and can lock a box \u2014 gate them behind an explicit flag; and audit -e 2 (immutable) must be the LAST rule and requires a reboot to change thereafter.",
+  "llm_guidance": "When elevating a CIS-baselined script to STIG with an LLM in the loop, enforce these rules so the model produces courtroom-defensible, non-bricking output:\n\n1. STIG SUPERSEDES CIS ON CONFLICT. Where CIS and STIG both touch a setting, take the STRICTER STIG value (e.g. password max-age 60 not 365, faillock even_deny_root+unlock_time=0 not auto-unlock, umask 077 not 027, SSH ciphers FIPS-only not the broad CIS list). Never 'average' the two. Flag, do not silently drop, any CIS setting STIG relaxes.\n\n2. CITE THE CONTROL. Every change must carry its STIG ID (RHEL-08-/RHEL-09-/UBTU-22-), legacy V-ID where known, CCI, and CAT severity in a comment or audit record. 'Hardened SSH' without the SRG/STIG mapping is not auditable. If unsure of an exact ID, say so \u2014 do NOT fabricate a V-ID or CCI number. Invented control IDs are worse than an honest 'verify against current benchmark'.\n\n3. BE DISTRO-AWARE, ALWAYS BRANCH. RHEL 9 ciphers/MACs/KEX are owned by update-crypto-policies, NOT sshd_config \u2014 writing them in sshd_config conflicts. RHEL 9 PAM is managed by authselect \u2014 raw /etc/pam.d edits get overwritten; use authselect features. RHEL 8.0/8.1 use pam-direct faillock, 8.2+ use faillock.conf. Ubuntu 20.04 uses pam_tally2, 22.04 uses pam_faillock. Ubuntu firewall is ufw, RHEL is firewalld/nftables. Ubuntu MAC is AppArmor, RHEL is SELinux. Ubuntu FIPS comes from Ubuntu Pro, not crypto-policies. Detect ID/VERSION_ID from /etc/os-release and pick the right path; never emit a RHEL-only command on Ubuntu.\n\n4. FIPS IS FOUNDATIONAL AND DANGEROUS. fips-mode-setup --enable and kernel fips=1 require a reboot and can leave a host unbootable or unreachable if initramfs/crypto regeneration fails or if existing keys are non-FIPS. NEVER enable kernel FIPS in an unattended default run. Gate it behind an explicit operator flag, snapshot first, and verify console/out-of-band access exists. The userspace crypto-policy FIPS setting is safe to apply; the kernel toggle is not.\n\n5. LOCKOUT-CLASS CHANGES NEED GUARDRAILS. Anything that can lock an operator out \u2014 GRUB password, USBGuard enforcement (kills HID on headless), nodev/nosuid/noexec mounts (noexec /tmp breaks installers), PAM stack edits, faillock even_deny_root, SSH rekey, audit -e 2 immutability, account locking \u2014 must (a) back up the original, (b) validate before activating (sshd -t, visudo -cf, pam test), (c) be reversible, and (d) ideally be staged so a single bad change cannot sever access. For PAM specifically, keep a root session open and test in a second session before closing.\n\n6. IDEMPOTENCE IS MANDATORY. Use upsert (replace-or-append per key), full-file rewrites for managed drop-ins, and 'check-then-act' for package/account ops. Re-running the elevation must converge, never duplicate lines or stack conflicting directives. Prefer drop-in directories (sshd_config.d, sysctl.d, profile.d, audit/rules.d, crypto-policies/local.d) over editing distro-shipped files.\n\n7. AUDIT -e 2 GOES LAST, LITERALLY. The immutable flag must be the final loaded audit rule (isolated 99-finalize.rules). Once set, auditd config changes need a reboot \u2014 so apply ALL other audit/auditd.conf/log-perm changes first, then finalize. Treat -e 2 as a commit, flag-gated.\n\n8. DON'T HARDCODE SITE SECRETS OR ENDPOINTS. GRUB/PKI passwords, DoD CA chains, authorized NTP servers, the remote rsyslog log host, smart-card OCSP responders are site-specific. Template them and require operator input; never bake a public NTP pool, a placeholder password, or a fake log host into a STIG config and call it compliant.\n\n9. PRESERVE LEGITIMATE EXCEPTIONS. A NOPASSWD sudoers line, an enabled gssproxy, a non-root service account, or a noexec-incompatible app may be operationally required. STIG allows documented exceptions (POA&M / risk acceptance). The model should FLAG these for operator decision, not blindly strip them and break production. Removing a needed NOPASSWD or locking a service account is a self-inflicted outage.\n\n10. VERIFY WITH THE CHECK, NOT THE FIX. After applying a fix, run the control's actual check command (sshd -T, auditctl -l, update-crypto-policies --show, sysctl, stat, getenforce) to confirm the running state matches \u2014 STIG compliance is assessed on EFFECTIVE running config, not on the presence of a config line. A directive in a file that a later drop-in overrides still fails the scan.\n\nAuditor addendum \u2014 also ensure: STIG-GRUB-PASSWORD: GRUB2 bootloader superuser password (RHEL-08-010140/-010150, RHEL-09-212010, UBTU grub) \u2014 promised in the summary but NO control object provided. Must set superusers + grub2-setpassword PBKDF2 hash in /boot/grub2/user.cfg (BIOS) or /boot/efi/.../user.cfg (UEFI). CAT II, reboot-affecting.; STIG-USBGUARD: USBGuard installed/enabled with a generated policy to whitelist authorized peripherals (RHEL-08-040139/-040140/-040141, RHEL-09-291035..291045). Summary names it; no control delivered.; STIG-REMOVABLE-NOEXEC: nodev/nosuid/noexec on removable media and on /tmp, /var/tmp, /dev/shm, /home (RHEL-08-040123..040134, RHEL-09-231xxx). Named in summary, no control object.; STIG-TIME-SYNC: authenticated/redundant time sync \u2014 chrony with maxpoll<=16, server/pool defined, and on RHEL-09 disable chronyd client port (port 0) (RHEL-08-030740/-030741, RHEL-09-252030..252050). Named, not delivered.; Full STIG audit.rules superset: the single STIG-AUDITD-INSTALL control covers daemon disk-full/failure behavior only. Missing the dozens of -a always,exit watch rules the summary itself enumerates: privileged-command auid>=1000 -k privileged execve auditing, time-change (adjtimex/settimeofday/clock_settime + /etc/localtime), identity (/etc/passwd,/etc/group,/etc/shadow,/etc/gshadow,/etc/security/opasswd), MAC-policy (/etc/selinux), perm_mod (chmod/chown/setxattr/*xattr EPERM+EACCES), access (open/openat/truncate EACCES/EPERM), mounts, delete (unlink/rename), module load/unload (init_module/delete_module/finit_module + kmod/insmod/rmmod/modprobe), sudo/sudoers (/etc/sudoers, /etc/sudoers.d), su, passwd/unix_chkpwd/chage/usermod/crontab/pam_timestamp_check, faillock/lastlog/tallylog writes, and the immutable -e 2 plus -f 2 epilogue. This is arguably the single largest STIG delta and is essentially absent.; STIG-SELINUX-ENFORCING: SELinux state=enforcing, targeted policy (RHEL-08-010170/-010171, RHEL-09-431010..431015) / AppArmor enabled+enforcing on Ubuntu (UBTU-22-291010). Core MAC requirement entirely missing.; STIG-SUDO-NOPASSWD/!authenticate + reauth + use_pty + sudo logfile (RHEL-08-010380/-010381/-010384, RHEL-09-432010..432040): no NOPASSWD/!authenticate in sudoers, Defaults timestamp_timeout=0, Defaults use_pty, Defaults logfile. Missing.; STIG-WHEEL/PAM-WHEEL: restrict su to wheel via pam_wheel.so (RHEL-08-010550), and pam_lastlog showfailed (RHEL-08-020340).; STIG-AIDE: AIDE installed, initialized, and run via cron/timer with notification, plus ACL/xattr/SHA512 checks (RHEL-08-010359..010374, RHEL-09-651010..651030). File-integrity baseline missing.; STIG-FAPOLICYD: fapolicyd application allowlisting in enforcing mode (RHEL-08-040135/-040136/-040137, RHEL-09-433010..433015). CAT II, STIG-specific, absent.; STIG-GUI-LOCK/IDLE: GNOME screensaver lock-enabled, lock-delay, idle-delay<=900s, and disable automatic login + disable ctrl-alt-del target (RHEL-08-020030..020082, RHEL-09-271xxx, systemctl mask ctrl-alt-del.target).; STIG-KERNEL-LOCKDOWN/MODULES: disable kernel.dmesg_restrict already in CIS, but STIG adds disable kdump (RHEL-08-010670), kernel.core_pattern, blacklist unused protocols/filesystems (cramfs, freevxfs, jffs2, dccp, sctp, rds, tipc \u2014 some overlap CIS but STIG pins them), and fips-compatible kernel.randomize_va_space=2.; STIG-ACCOUNT-INACTIVITY: disable accounts after 35 days inactivity (INACTIVE=35 in useradd defaults, RHEL-08-020260/-020270, RHEL-09-411010), and emergency/temp accounts auto-expire 72h.; STIG-UMASK-077-or-027: default umask 077 in /etc/login.defs and shell init (RHEL-08-020351/-020352, RHEL-09-411040) \u2014 STIG pins this where CIS allows 027.; STIG-MULTIFACTOR/SMARTCARD: pam_pkcs11 / SSSD smartcard (CAC/PIV) auth and certificate mapping (RHEL-08-010090..010130, RHEL-09-611010, CCI-000765/000766/000767/000768) \u2014 a defining DoD STIG requirement entirely absent.; STIG-GPGCHECK/REPO: dnf gpgcheck=1, localpkg_gpgcheck=1, repo_gpgcheck (RHEL-08-010370/-010371/-010372). Missing.; STIG-FIPS-INITRD/BOOT integrity caveat: control STIG-FIPS-KERNEL omits the separate /boot partition + boot= argument requirement and that fips_enabled alone is insufficient without crypto-policy and bootloader BootHole/Secure Boot considerations.; Ubuntu-specific mappings underspecified: UFW default-deny, libpam-modules, /etc/pam.d/common-* exact ordering, gnome banner via gsettings for Ubuntu, and Ubuntu Pro USG (Ubuntu Security Guide) tooling are not addressed despite Ubuntu being in-scope.; Coverage-tracking note: rubric is truncated mid-control at STIG-AUDIT-PRIVILEGE \u2014 the audit-rule controls may be partially present beyond the cutoff; scored on visible content.\nAuditor corrections: STIG-PWAGE is FACTUALLY WRONG on password history: STIG RHEL-08-020220 (SV-230368r627750) and RHEL-09-611115 require remember=5 (minimum FIVE generations), NOT remember=24. The '24-password history' figure stated in both the summary and the control is a CIS/Windows-flavored number and would be an immediate finding-of-the-rubric for an expert witness. Fix the check, fix, and summary to remember=5.; STIG-SSH-PARAMS is WRONG on ClientAliveCountMax: RHEL-08-010200 (and the RHEL-09 equivalent) requires ClientAliveCountMax 0 with ClientAliveInterval 600 to hit the mandated 10-minute idle termination. The rubric's ClientAliveCountMax 1 yields a 20-minute timeout and is itself a finding. (Caveat the auditor should note: DISA temporarily withdrew RHEL-08-010200/010201 from the RHEL 8 profile due to the OpenSSH 8.x ClientAlive behavior change \u2014 the modern guidance leans on a sshd idle/Timeout or tmout-based control; the rubric should acknowledge this rather than assert CountMax 1.); STIG-FAILLOCK omits root_unlock_time: current RHEL-09-411075 / RHEL-08-020017 pairs even_deny_root with root_unlock_time=60 (not unlock_time=0 for root). Stating unlock_time=0 + even_deny_root alone is incomplete and can over-lock root with no admin-recovery path on a headless box \u2014 exactly the lockout risk the summary warns about. Add root_unlock_time and a recovery note.; STIG-SSH-CIPHERS / MACS / KEX over-claim the RHEL 9 mechanism: it is correct that RHEL 9 enforces via update-crypto-policies and that you should NOT hand-edit /etc/crypto-policies/back-ends/openssh.config (it is generated), but the rubric's check greps that generated file as the source of truth. The auditable artifact is the policy (update-crypto-policies --show == FIPS) plus the runtime sshd -T; a drop-in in /etc/ssh/sshd_config.d/ with a numeric prefix <50 (before the crypto-policy Include) is the only supported override path. Tighten the check to avoid asserting on a regenerated file.; STIG-SSH-KEX: listing diffie-hellman-group-exchange-sha256 and group14-sha256 is defensible, but several recent RHEL-09-2550xx revisions DROP group-exchange and group14 in favor of group16/group18-sha512 and ecdh-sha2-nistp* only. The KEX set is version-sensitive (v1r1 vs v1r2+) \u2014 pin the STIG release or the check will false-pass/false-fail across benchmark versions.; STIG-SSH-BANNER severity hedging: calling a missing SSH banner 'can be CAT I' is not accurate to the benchmark \u2014 RHEL-08-010040 and RHEL-09-255025 are CAT II as published. The legal-consent CAT I framing is editorial, not the DISA severity; an expert witness would not testify it is CAT I per STIG.; STIG-PWQUALITY maxclassrepeat=4: STIG does not set maxclassrepeat to 4 \u2014 the relevant RHEL-08-020140/020150/020160 pin maxclassrepeat=4 is conflated; verify against the benchmark (several versions omit maxclassrepeat entirely and instead pin maxsequence). Also minclass=4 and ucredit/lcredit/dcredit/ocredit=-1 are partially redundant under minclass \u2014 note the interaction so the engine does not write contradictory keys.; STIG-FIPS-KERNEL Ubuntu fix is imprecise: 'pro enable fips-updates; then update-grub with fips=1' understates that the Ubuntu FIPS kernel/packages set the boot args via the ua/pro tooling and the canonical verification is /proc/sys/crypto/fips_enabled==1 after reboot; manually appending fips=1 to GRUB without the certified module set yields a non-validated config (worse than nothing for compliance).",
+  "references": [
+    "DISA Red Hat Enterprise Linux 9 STIG (V2Rx) \u2014 stigviewer.com/stigs/red_hat_enterprise_linux_9, e.g. V-257989 SSH FIPS ciphers, V-257787 GRUB superuser password, V-258036 USBGuard",
+    "DISA Red Hat Enterprise Linux 8 STIG (V1Rx) \u2014 stigviewer.com/stigs/red_hat_enterprise_linux_8, e.g. V-230334/SV-230336 pam_faillock deny=3 fail_interval=900, RHEL-08-010020 FIPS",
+    "DISA Canonical Ubuntu 22.04 LTS STIG (V2Rx) \u2014 stigviewer.com/stigs/canonical_ubuntu_22.04_lts, e.g. UBTU-22-411045 pam_faillock, UBTU-22-251015/251020 ufw, V-260515",
+    "DISA Canonical Ubuntu 20.04 LTS STIG \u2014 uses pam_tally2 and apparmor; ubuntu.com/security/certifications/docs/disa-stig",
+    "General Purpose Operating System SRG (GPOS-SRG) \u2014 DoD Cyber Exchange public.cyber.mil/stigs",
+    "DoD Cyber Exchange \u2014 STIG/SRG library and DoD Standard Mandatory Notice and Consent Banner text: public.cyber.mil",
+    "Red Hat: Using system-wide cryptographic policies (FIPS) \u2014 docs.redhat.com Security hardening ch.3 (RHEL8) / ch.4 (RHEL9); update-crypto-policies --set FIPS; fips-mode-setup --enable",
+    "Red Hat: DISA STIG for RHEL 9 / automation (SCAP Security Guide, scap-security-guide ComplianceAsCode) \u2014 redhat.com/en/blog DISA STIG RHEL9; github.com/ComplianceAsCode/content",
+    "Tenable audit references for DISA STIG RHEL 9 v2r3 / RHEL 8 \u2014 tenable.com/audits (RHEL-09-255065 ciphers, RHEL-08-020012 faillock)",
+    "CIS Benchmarks RHEL/Ubuntu Level 1 & 2 \u2014 used as the baseline this rubric computes the delta against (cisecurity.org)",
+    "NIST FIPS 140-2 / 140-3, FIPS 200, and NIST SP 800-53 control mappings referenced by CCIs in the STIGs",
+    "auditd / audit.rules STIG ruleset references \u2014 ansible-lockdown/RHEL9-STIG, ComplianceAsCode audit content, augenrules(8)"
+  ],
+  "controls": [
+    {
+      "id": "STIG-FIPS-KERNEL",
+      "title": "Enable FIPS 140-2/140-3 mode in the kernel and system-wide crypto policy",
+      "severity": "CAT I",
+      "rationale": "CIS recommends strong crypto but does NOT require FIPS-validated modules. STIG (RHEL-08-010020 / RHEL-09-671010 / UBTU-22-671010, CCI-000803/CCI-002450) mandates the OS implement NIST FIPS-validated cryptography for all hashing/encryption. Without fips=1 the kernel and userspace may select non-validated algorithms, which is an automatic finding and invalidates the crypto basis of every other control.",
+      "check": "RHEL: fips-mode-setup --check | grep -q 'FIPS mode is enabled' && grep -qw fips=1 /proc/cmdline && [ \"$(update-crypto-policies --show)\" = FIPS -o \"$(update-crypto-policies --show)\" = 'FIPS:OSPP' ]; cat /proc/sys/crypto/fips_enabled (must be 1). Ubuntu: grep -qw fips=1 /proc/cmdline && cat /proc/sys/crypto/fips_enabled (1).",
+      "fix": "RHEL: dnf -y install crypto-policies crypto-policies-scripts; fips-mode-setup --enable (regenerates initramfs, sets fips=1 + boot_aliases, switches crypto-policy to FIPS); reboot. Ubuntu Pro: pro enable fips-updates; then update-grub with fips=1; reboot. Verify with fips-mode-setup --check after reboot.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04 (Ubuntu Pro/Advantage required for certified FIPS modules)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SSH-CIPHERS",
+      "title": "Restrict SSH ciphers to DoD/FIPS-approved set",
+      "severity": "CAT II",
+      "rationale": "CIS allows a broad 'strong cipher' list (e.g. chacha20-poly1305). STIG (RHEL-08-010291/RHEL-09-255065, V-257989, CCI-000068/CCI-000803) permits ONLY FIPS-approved AES-CTR/GCM ciphers. chacha20 and others are findings. On RHEL 9 this is enforced via the crypto-policy openssh back-end, NOT sshd_config directly.",
+      "check": "RHEL8/Ubuntu: sshd -T | grep -i '^ciphers' must equal 'aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr' (no chacha20). RHEL9: grep -i '^Ciphers' /etc/crypto-policies/back-ends/openssh.config.",
+      "fix": "RHEL8/Ubuntu: set 'Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr' in /etc/ssh/sshd_config (drop-in /etc/ssh/sshd_config.d/00-stig.conf) and restart sshd. RHEL9: rely on update-crypto-policies --set FIPS which writes the back-end; do not override in sshd_config.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SSH-MACS",
+      "title": "Restrict SSH MACs to FIPS-approved HMAC-SHA2 set",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010290/RHEL-09-255070, CCI-001453) requires only hmac-sha2-512/256 (ETM variants). CIS tolerates umac-* which STIG rejects. MD5 and 96-bit MACs are CAT II findings.",
+      "check": "sshd -T | grep -i '^macs' must be 'hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256' (no umac, no md5, no -64/-96). RHEL9: check /etc/crypto-policies/back-ends/openssh.config.",
+      "fix": "Set 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256' in sshd_config drop-in; RHEL9 via crypto-policy FIPS. Restart sshd.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SSH-KEX",
+      "title": "Restrict SSH key-exchange to FIPS-approved KEX algorithms",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010291/RHEL-09-255075, CCI-001453) requires FIPS-approved KEX: ecdh-sha2-nistp*, diffie-hellman-group*-sha256/sha512, group-exchange-sha256. curve25519 and sha1 group exchanges are findings under FIPS.",
+      "check": "sshd -T | grep -i '^kexalgorithms' contains only ecdh-sha2-nistp256/384/521, diffie-hellman-group16-sha512, group18-sha512, group-exchange-sha256, group14-sha256; no sha1, no curve25519 (when FIPS).",
+      "fix": "Set 'KexAlgorithms ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256' in sshd_config drop-in; RHEL9 via crypto-policy FIPS. Restart sshd.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SSH-PARAMS",
+      "title": "SSH daemon hardening parameters (ClientAlive, LoginGraceTime, MaxAuthTries, root login, X11, etc.)",
+      "severity": "CAT II",
+      "rationale": "STIG sets specific numeric values CIS does not always pin: ClientAliveInterval 600 + ClientAliveCountMax 1 (RHEL-08-010200/RHEL-09-255095, CCI-001133/CCI-002361 \u2014 session must terminate at 10 min idle), LoginGraceTime 60 (RHEL-09-255100), MaxAuthTries 6, PermitRootLogin no (CAT II), PermitEmptyPasswords no, PermitUserEnvironment no, X11Forwarding no, IgnoreRhosts yes, HostbasedAuthentication no, StrictModes yes, Compression no/delayed, GSSAPIAuthentication no, KerberosAuthentication no.",
+      "check": "sshd -T and assert: clientaliveinterval 600; clientalivecountmax 1; logingracetime 60; maxauthtries 6; permitrootlogin no; permitemptypasswords no; permituserenvironment no; x11forwarding no; ignorerhosts yes; hostbasedauthentication no; strictmodes yes; gssapiauthentication no; kerberosauthentication no.",
+      "fix": "Write all directives to /etc/ssh/sshd_config.d/00-stig.conf (or main config if no drop-in support), validate with sshd -t, then systemctl restart sshd.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SSH-BANNER",
+      "title": "SSH presents the DoD Standard Mandatory Notice and Consent Banner",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010040/RHEL-09-255025, UBTU-22-255010, CCI-000048/CCI-001384) requires the exact DoD consent banner before authentication. CIS only asks for 'a' banner; STIG requires the verbatim text and that sshd Banner points to it. Missing/legally-deficient banner can be CAT I where user consent to monitoring is a legal prerequisite.",
+      "check": "grep -i '^Banner' from sshd -T resolves to /etc/issue.net (RHEL/Ubuntu) and that file contains the exact DoD notice ('You are accessing a U.S. Government (USG) Information System (IS)...'). Hash-compare against the canonical banner.",
+      "fix": "Write the verbatim DoD banner to /etc/issue.net and /etc/issue; set 'Banner /etc/issue.net' in sshd_config drop-in; restart sshd.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-CONSOLE-BANNER",
+      "title": "Console/CLI and GUI (GDM) login present the DoD banner and require acknowledgement",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010050/RHEL-09-271010, CCI-000048) requires the graphical and command-line login to display the DoD notice and, for GUI, require the user to click OK to acknowledge (banner-message-enable + banner-message-text via dconf). CIS does not require the dconf acknowledgement.",
+      "check": "/etc/issue contains DoD banner. If GUI present: gsettings/dconf org.gnome.login-screen banner-message-enable=true and banner-message-text set to the DoD notice; /etc/dconf/db/gdm.d/* present and dconf update applied.",
+      "fix": "Write DoD text to /etc/issue. GUI: create /etc/dconf/db/gdm.d/01-banner-message with banner-message-enable=true and banner-message-text='...DoD notice...'; lock keys in /etc/dconf/db/gdm.d/locks/; run dconf update.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-PWQUALITY",
+      "title": "pam_pwquality enforced to STIG complexity (length, classes, repeats, dictionary, FIPS hashing)",
+      "severity": "CAT II",
+      "rationale": "STIG pins exact pwquality values CIS leaves softer: minlen=15 (RHEL-08-020230/RHEL-09-611080), ucredit=-1, lcredit=-1, dcredit=-1, ocredit=-1, difok=8, maxrepeat=3, maxclassrepeat=4, dictcheck=1, enforce_for_root, retry=3, minclass=4. Plus password hashing must be SHA-512/yescrypt with FIPS-validated hashing (RHEL-08-010130).",
+      "check": "Parse /etc/security/pwquality.conf (and pwquality.conf.d/*): minlen>=15, dcredit<=-1, ucredit<=-1, lcredit<=-1, ocredit<=-1, difok>=8, maxrepeat<=3, maxclassrepeat<=4, dictcheck=1, enforce_for_root present. PAM stack includes pam_pwquality.so retry=3. Check /etc/login.defs ENCRYPT_METHOD SHA512 and SHA_CRYPT_MIN_ROUNDS=5000.",
+      "fix": "Write keys idempotently into /etc/security/pwquality.conf; ensure 'password requisite pam_pwquality.so retry=3 enforce_for_root' in /etc/pam.d/system-auth & password-auth (RHEL) or /etc/pam.d/common-password (Ubuntu, with libpam-pwquality installed). Set ENCRYPT_METHOD SHA512 in /etc/login.defs.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04 (install libpam-pwquality on Ubuntu)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-FAILLOCK",
+      "title": "Account lockout via pam_faillock \u2014 deny=3, fail_interval=900, admin-only unlock, even_deny_root",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-020011..020019, RHEL-09-411045..411075, UBTU-22-411045, CCI-000044/CCI-002238) requires lock after 3 failed attempts in 15 min, lock even root (even_deny_root), and unlock only by admin (unlock_time=0). CIS Level 1 typically uses 5 attempts and a 900s auto-unlock \u2014 STIG's even_deny_root and unlock_time=0 are the delta.",
+      "check": "RHEL8: faillock lines present in /etc/pam.d/system-auth & password-auth (preauth+authfail+account) OR /etc/security/faillock.conf with deny=3 fail_interval=900 unlock_time=0 even_deny_root silent audit dir=/var/log/faillock. RHEL9/Ubuntu22: /etc/security/faillock.conf has deny=3, fail_interval=900, unlock_time=0, even_deny_root; pam_faillock present in common-auth/system-auth.",
+      "fix": "Preferred (RHEL8.2+/9, Ubuntu22.04): write deny=3, fail_interval=900, unlock_time=0, even_deny_root, silent, audit, dir=/var/log/faillock into /etc/security/faillock.conf and ensure 'auth required pam_faillock.so preauth' + 'authfail' + 'account required pam_faillock.so' lines exist (authselect on RHEL9: authselect enable-feature with-faillock). Ubuntu 20.04 uses pam_tally2 \u2014 map to /etc/pam.d/common-auth tally2.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04(tally2)/22.04(faillock)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-PWAGE",
+      "title": "Password aging: max 60 days, min 1 day, 7-day warn, 24-password history, no reuse",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-020200/020210/020220, RHEL-09-611105..611115, CCI-000198/CCI-000199/CCI-000200) requires PASS_MAX_DAYS 60, PASS_MIN_DAYS 1, PASS_WARN_AGE 7, and password history remember=24 via pam_pwhistory/pam_unix. CIS L1 commonly allows 365-day max and remember=5 \u2014 the 60-day and remember=24 are the STIG delta.",
+      "check": "grep PASS_MAX_DAYS /etc/login.defs <=60; PASS_MIN_DAYS >=1; PASS_WARN_AGE >=7. PAM password line has remember=24. Per-user: awk -F: of /etc/shadow field5 <=60 for interactive accounts.",
+      "fix": "Set PASS_MAX_DAYS 60 / PASS_MIN_DAYS 1 / PASS_WARN_AGE 7 in /etc/login.defs; add 'password requisite pam_pwhistory.so use_authtok remember=24 retry=3' (RHEL9) or remember=24 on pam_unix (Ubuntu/RHEL8) in the password stack; apply chage -M 60 -m 1 -W 7 to existing interactive users.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-AUDITD-INSTALL",
+      "title": "auditd installed, enabled, and configured for disk-full and failure behavior",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030180/RHEL-09-653010, CCI-000139/CCI-001851) requires auditd running, space_left_action and admin_space_left_action set (email/syslog/halt for high-water), disk_full_action and disk_error_action = HALT/SINGLE, and audit failure flag -f set. CIS installs auditd but does not pin disk-full/failure actions.",
+      "check": "systemctl is-active auditd = active; grep in /etc/audit/auditd.conf: space_left_action, admin_space_left_action=single/halt, disk_full_action, disk_error_action, max_log_file_action=ROTATE; auditctl -s shows failure flag.",
+      "fix": "dnf/apt install audit; systemctl enable --now auditd; set in auditd.conf: space_left_action=email, admin_space_left_action=single, disk_full_action=HALT, disk_error_action=HALT, max_log_file_action=ROTATE, log_file permissions 0600 root.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-AUDIT-PRIVILEGED",
+      "title": "Audit all privileged (setuid/setgid) command execution",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030360 et al., RHEL-09-654xxx, CCI-000130/CCI-002234) requires an -a always,exit rule for every setuid/setgid binary on the system with auid auditing. This is a large, system-specific ruleset CIS does not generate. Missing any privileged-command rule is a per-binary finding.",
+      "check": "For each path from 'find / -xdev -perm /6000 -type f': auditctl -l shows a matching '-a always,exit ... -S all -F path=<bin> -F perm=x -F auid>=1000 -F auid!=unset -k privileged' rule.",
+      "fix": "Generate rules: for b in $(find / -xdev \\( -perm -4000 -o -perm -2000 \\) -type f 2>/dev/null); do echo \"-a always,exit -F path=$b -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged\"; done >> /etc/audit/rules.d/stig-privileged.rules; augenrules --load.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-AUDIT-SYSCALLS",
+      "title": "STIG audit.rules syscall/file superset: time-change, identity, MAC-policy, perm-mod, access, mounts, delete, modules, network env",
+      "severity": "CAT II",
+      "rationale": "STIG mandates a specific, named set of audit rules (RHEL-08-030xxx series, CCI-000172) far beyond CIS: time-change (adjtimex/settimeofday/clock_settime + /etc/localtime), identity (/etc/passwd,group,gshadow,shadow,security/opasswd), MAC-policy (/etc/selinux,/usr/share/selinux or /etc/apparmor.d), perm_mod (chmod/chown/setxattr/fchmodat/etc with -F auid), access (open/openat/truncate EACCES+EPERM), mounts, delete (unlink/rename), modules (init_module/delete_module/finit_module/kmod), and login/logout (faillog,lastlog,tallylog). Each missing key is a finding.",
+      "check": "auditctl -l | grep -E -- '-k (time-change|identity|MAC-policy|perm_mod|access|mounts|delete|module_chng|logins|module_load)' returns the full expected set for the architecture (b64 and b32 where 32-bit syscalls exist).",
+      "fix": "Drop the canonical STIG ruleset into /etc/audit/rules.d/stig.rules (b32+b64 variants of each syscall group, each with -k <key>) then augenrules --load. Use distro-correct MAC paths (SELinux on RHEL, /etc/apparmor.d on Ubuntu).",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-AUDIT-SUDO",
+      "title": "Audit sudo, su, sudoers changes, and execve of privilege tools",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030550..030570, RHEL-09-654xxx, CCI-000172/CCI-002234) requires watch+exit rules on /usr/bin/sudo, /usr/bin/su, /etc/sudoers, /etc/sudoers.d/, sudoedit, chsh, passwd, gpasswd, newgrp, usermod, with auid>=1000. CIS audits some of these but not the full privilege-escalation set.",
+      "check": "auditctl -l shows -a always,exit -F path=/usr/bin/sudo (and su, chsh, gpasswd, newgrp, passwd, unix_chkpwd, pam_timestamp_check, usermod) with -F auid>=1000 -k privileged-priv-change/identity; -w /etc/sudoers -p wa and -w /etc/sudoers.d/ -p wa.",
+      "fix": "Append path-based execve rules and -w watches for sudoers to /etc/audit/rules.d/stig.rules; augenrules --load.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-AUDIT-IMMUTABLE",
+      "title": "Audit configuration immutable (-e 2) and failure mode panic/halt (-f 2 where required)",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030121/RHEL-09-653030, CCI-000162/CCI-000163) requires the audit config be made immutable with '-e 2' (last rule) so rules cannot be changed without reboot, and the system act on audit failure. CIS does not require immutability. NOTE: -e 2 must be the final rule; changes thereafter need a reboot \u2014 engine must place it last.",
+      "check": "auditctl -s | grep -E 'enabled 2'; tail of /etc/audit/rules.d/*.rules ends with '-e 2'; failure flag set as required.",
+      "fix": "Ensure '-e 2' is the LAST line written across the loaded rule set (in a high-numbered file like 99-finalize.rules); augenrules --load; a reboot finalizes immutability. Gate behind explicit flag because it complicates further automated changes.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-AIDE",
+      "title": "AIDE installed, initialized, and scheduled with crypto hashes (SHA512/FIPS)",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010359/RHEL-08-010360/RHEL-09-651010..651030, CCI-000366/CCI-001744) requires AIDE installed, a populated database, a scheduled (cron/timer) integrity check, and AIDE configured to use FIPS-approved hashes (sha512) and to verify ACLs/xattrs/SELinux contexts. CIS recommends file integrity but does not pin the hash/notification/schedule specifics.",
+      "check": "rpm -q aide / dpkg -l aide; /var/lib/aide/aide.db.gz exists; cron/systemd-timer present (/etc/cron.daily/aide or aidecheck.timer); aide.conf rule lines include sha512 (not md5-only); notification configured.",
+      "fix": "Install aide; aide --init && mv /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz; ensure config uses sha512 and acl,selinux,xattrs attributes; install daily timer/cron that runs 'aide --check' and mails results to root/security.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-GRUB-PASSWORD",
+      "title": "Bootloader (GRUB2) protected by a superuser password",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010140/010150, RHEL-09-212010, UBTU-22-211010, CCI-000213) requires a GRUB2 superuser password so boot parameters cannot be edited (preventing single-user/rescue bypass). CIS recommends it but STIG enforces the encrypted PBKDF2 password present. REBOOT/lockout risk \u2014 gate behind flag and capture the password securely.",
+      "check": "RHEL: grep -i 'GRUB2_PASSWORD' /boot/grub2/user.cfg (BIOS) or /boot/efi/EFI/<distro>/user.cfg (UEFI); password starts grub.pbkdf2.sha512. Ubuntu: grep -r 'password_pbkdf2' /etc/grub.d/ and a set superuser.",
+      "fix": "RHEL: grub2-setpassword (interactive) or write grub.pbkdf2 hash to user.cfg; do NOT regenerate grub.cfg in a way that wipes it. Ubuntu: add 'set superusers' + 'password_pbkdf2' to /etc/grub.d/40_custom using grub-mkpasswd-pbkdf2 output, then update-grub. Requires operator-supplied secret; do not hardcode.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": false
+    },
+    {
+      "id": "STIG-USBGUARD",
+      "title": "USBGuard installed and enforcing an allowlist of authorized peripherals",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-040139/040140/040141, RHEL-09-291010..291020, CCI-001958/CCI-000778) requires the OS to block unauthorized USB/peripheral connections via USBGuard (or equivalent), with an active policy and auditing of USBGuard events. CIS has no peripheral-allowlisting requirement at all \u2014 pure delta. CAUTION: a generated allowlist can lock out the current keyboard/mouse on remote/headless boxes.",
+      "check": "rpm -q usbguard / dpkg -l usbguard; systemctl is-active usbguard; usbguard list-rules returns a non-empty policy; auditd rule -w /etc/usbguard/ present (RHEL-09-291020).",
+      "fix": "Install usbguard; usbguard generate-policy --no-hash > /etc/usbguard/rules.conf; systemctl enable --now usbguard. On headless systems first ensure console HID devices are allowed before enforcing. Gate enforcement behind flag.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": false
+    },
+    {
+      "id": "STIG-SYSCTL-KERNEL",
+      "title": "Kernel sysctl hardening: ASLR, kptr_restrict, dmesg_restrict, ptrace_scope, perf_event, kexec, core dumps, BPF",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010375/010376/010671, RHEL-09-213xxx, CCI-000366/CCI-002824) pins exact sysctls: kernel.randomize_va_space=2, kernel.kptr_restrict=1, kernel.dmesg_restrict=1, kernel.yama.ptrace_scope=1, kernel.perf_event_paranoid=2, kernel.kexec_load_disabled=1, kernel.core_pattern=|/bin/false (or fs.suid_dumpable=0), kernel.unprivileged_bpf_disabled=1, net.core.bufsize defaults. CIS covers ASLR and dmesg but not the full set (ptrace_scope, kexec_load_disabled, perf_event_paranoid, unprivileged_bpf_disabled).",
+      "check": "sysctl -a and assert each: kernel.randomize_va_space=2, kernel.kptr_restrict=1, kernel.dmesg_restrict=1, kernel.yama.ptrace_scope=1, kernel.perf_event_paranoid>=2, kernel.kexec_load_disabled=1, fs.suid_dumpable=0, kernel.unprivileged_bpf_disabled=1.",
+      "fix": "Write each key=value into /etc/sysctl.d/99-stig.conf (idempotent), then sysctl --system. Ensure no conflicting lower value in /etc/sysctl.conf or earlier-numbered drop-ins.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SYSCTL-NET",
+      "title": "Network sysctl hardening: redirects, source-route, rp_filter, log_martians, tcp_syncookies, IPv6 RA",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-040249..040286, RHEL-09-253xxx, CCI-000366) pins ICMP redirect accept/send=0 (all+default), accept_source_route=0, secure_redirects=0, rp_filter=1, log_martians=1, tcp_syncookies=1, and IPv6 equivalents incl. accept_ra=0 where IPv6 unused. Overlaps CIS but STIG requires BOTH 'all' and 'default' set and IPv6 variants \u2014 partial CIS configs still fail.",
+      "check": "sysctl assert for all+default: net.ipv4.conf.*.accept_redirects=0, send_redirects=0, accept_source_route=0, secure_redirects=0, rp_filter=1, log_martians=1; net.ipv4.tcp_syncookies=1; net.ipv6.conf.*.accept_redirects=0, accept_source_route=0, accept_ra=0 (if IPv6 enabled).",
+      "fix": "Append to /etc/sysctl.d/99-stig-net.conf and sysctl --system; ensure both .all and .default keys present for every directive.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-MOUNT-OPTS",
+      "title": "Filesystem mount options nodev/nosuid/noexec on /tmp, /var/tmp, /dev/shm, /home, removable media",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-040120..040134, RHEL-09-231xxx, UBTU-22-232xxx, CCI-001764) requires nodev+nosuid+noexec on /tmp, /var/tmp, /dev/shm; nodev+nosuid on /home; and nodev+nosuid+noexec on all removable media. CIS recommends these but tolerates missing separate partitions; STIG cites each specifically. REBOOT/breakage risk if /tmp gets noexec and software needs it \u2014 gate behind flag.",
+      "check": "findmnt -no OPTIONS /tmp,/var/tmp,/dev/shm,/home contains the required opts; for removable media check /etc/fstab entries. mount | grep for each.",
+      "fix": "Update /etc/fstab options for existing separate mounts; for /dev/shm add a tmpfs line with nodev,nosuid,noexec; for /tmp use tmp.mount drop-in (systemd) with the options; remount with mount -o remount. If no separate partition exists, flag for manual partitioning (cannot be fully automated post-install).",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": false
+    },
+    {
+      "id": "STIG-TMOUT",
+      "title": "Shell idle session timeout (TMOUT) auto-logs out after 10 minutes",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-020310/RHEL-09-412035, UBTU-22-412020, CCI-001133/CCI-002361) requires interactive shells to terminate after 600s idle via readonly TMOUT in /etc/profile.d. CIS L1 does not mandate TMOUT. Complements SSH ClientAlive for local/serial sessions.",
+      "check": "grep -r TMOUT /etc/profile /etc/profile.d/ shows 'TMOUT=600' (or less, >0), exported and 'readonly TMOUT'.",
+      "fix": "Write /etc/profile.d/99-terminal_tmout.sh with: TMOUT=600; readonly TMOUT; export TMOUT.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-UMASK",
+      "title": "Default umask 077 for users and daemons",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-020351/RHEL-09-411085, UBTU-22-412015, CCI-000366) requires UMASK 077 in /etc/login.defs, /etc/profile, /etc/bashrc, and /etc/csh.cshrc (and Ubuntu /etc/profile + pam). CIS commonly accepts 027 \u2014 the 077 (no group/other access) is the STIG delta.",
+      "check": "grep -i '^UMASK' /etc/login.defs = 077; grep umask /etc/profile /etc/bashrc /etc/profile.d/* show 077; Ubuntu: pam_umask/login.defs.",
+      "fix": "Set UMASK 077 in /etc/login.defs; replace any umask 022/027 in /etc/profile, /etc/bashrc, /etc/csh.cshrc, /etc/profile.d/* with 077.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-CRYPTO-POLICY",
+      "title": "System-wide crypto policy set to FIPS (and no per-app crypto-policy opt-outs)",
+      "severity": "CAT II",
+      "rationale": "Beyond kernel fips=1, STIG (RHEL-08-010020 follow-ons, RHEL-09-672010..672050, CCI-001453) requires update-crypto-policies --set FIPS so GnuTLS, OpenSSL, OpenSSH, libreswan, Kerberos all inherit FIPS, AND that no application back-end overrides it with a weaker local policy. RHEL-specific mechanism CIS does not exercise.",
+      "check": "update-crypto-policies --show = FIPS (or FIPS:OSPP). Verify back-ends: ls -l /etc/crypto-policies/back-ends/*.config point into FIPS policy; grep for opensslcnf MinProtocol TLSv1.2; no MD5/SHA1 enablement.",
+      "fix": "RHEL: dnf -y reinstall crypto-policies; update-crypto-policies --set FIPS; restart affected services (sshd, etc.). Confirm no /etc/crypto-policies/local.d overrides relax the policy.",
+      "applies_to": "RHEL/Rocky/Alma 8,9 (Ubuntu uses per-app FIPS via Pro, not crypto-policies)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-TLS-MINPROTO",
+      "title": "OpenSSL/GnuTLS minimum protocol TLS 1.2 (TLS 1.0/1.1 and SSLv3 disabled)",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010294/RHEL-09-672010, CCI-001453/CCI-002418) requires TLS 1.2 minimum across the OS crypto back-ends. CIS focuses on individual services; STIG requires the OS-level default to forbid <TLS1.2.",
+      "check": "grep -i MinProtocol /etc/crypto-policies/back-ends/opensslcnf.config (= TLSv1.2 or DTLSv1.2); openssl s_client refuses TLS1.1 against local services; GnuTLS system priority excludes VERS-TLS1.0/1.1.",
+      "fix": "Achieved via crypto-policy FIPS/FUTURE; if managing directly, set MinProtocol=TLSv1.2 in opensslcnf.config and restart services.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04 (openssl.cnf)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-CHRONY-AUTH",
+      "title": "Authenticated/secure time synchronization via chrony to authorized servers",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030740/RHEL-09-252010..252040, UBTU-22-252010, CCI-001891/CCI-002046) requires chrony (not ntpd), configured to authorized DoD/authoritative time sources, with maxpoll <=16, and to not act as a server (port 0 / no client access). CIS asks for time sync but not the authorized-source / maxpoll / no-serve specifics.",
+      "check": "rpm -q chrony; systemctl is-active chronyd; grep server/pool /etc/chrony.conf points to authorized sources; 'maxpoll 16' or less; 'port 0' and 'cmdport 0' set; no 'allow' lines exposing service.",
+      "fix": "Install chrony, remove ntp; set server <authorized> iburst maxpoll 16; add 'port 0' to /etc/chrony.conf (RHEL) or /etc/chrony/chrony.conf (Ubuntu); systemctl enable --now chronyd; remove conflicting timesyncd.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-RSYSLOG-REMOTE",
+      "title": "Logs forwarded to a remote/central log host over encrypted transport",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030690/030710, RHEL-09-652025..652030, CCI-001851) requires off-host log aggregation (rsyslog @@remote over TLS) and that the system not accept inbound syslog unless it IS the aggregator. CIS recommends remote logging but STIG requires it and requires TLS (gtls) for the transport.",
+      "check": "grep -E '^\\*\\.\\* @@' /etc/rsyslog.conf or /etc/rsyslog.d/*; check $DefaultNetstreamDriver gtls + certs for encryption; verify ModLoad imtcp NOT enabled on non-aggregators.",
+      "fix": "Add '*.* @@logserver.mil:6514' with gtls driver config and CA cert to /etc/rsyslog.d/00-stig-remote.conf; systemctl restart rsyslog. Requires site log host + cert \u2014 flag the endpoint for operator input.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": false
+    },
+    {
+      "id": "STIG-JOURNALD-PERSIST",
+      "title": "journald persistent, compressed, and permission-restricted",
+      "severity": "CAT III",
+      "rationale": "STIG (RHEL-08-030600 area, RHEL-09-652xxx, CCI-001851) requires systemd-journald to compress and persist logs (Storage=persistent, Compress=yes, ForwardToSyslog=yes) so audit/forensic data survives reboot. CIS does not pin journald storage mode.",
+      "check": "grep -E '^(Storage|Compress|ForwardToSyslog)' /etc/systemd/journald.conf = persistent/yes/yes; /var/log/journal exists with 2755 root:systemd-journal.",
+      "fix": "Set Storage=persistent, Compress=yes, ForwardToSyslog=yes in /etc/systemd/journald.conf; mkdir -p /var/log/journal; systemctl restart systemd-journald.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-LOG-PERMS",
+      "title": "Log and audit file/directory permissions locked down (0600/0640, root or proper group)",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-030000..030020/RHEL-09-653xxx, CCI-000162/CCI-000163) requires /var/log/audit and log files 0600 root:root, /var/log dir 0755, and rsyslog-managed logs 0640 root:syslog (Ubuntu) \u2014 and that logrotate preserves these. CIS checks some but STIG audits the audit-log perms specifically (world-readable audit = CAT I exposure).",
+      "check": "stat -c '%a %U %G' /var/log/audit/audit.log = 600 root root; /var/log/audit dir 700; system logs not world-readable; logrotate create modes match.",
+      "fix": "chmod 0600 /var/log/audit/audit.log; chmod 0700 /var/log/audit; chown root:root; set 'log_group root' and 'log_file_mode 0600' in auditd.conf; align /etc/logrotate.d entries to create 0640 root <group>.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SSSD-SMARTCARD",
+      "title": "SSSD configured for centralized auth and DoD CAC/PIV smart-card (PKI) authentication",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010090..010130, RHEL-09-611010 area, CCI-000765/CCI-001948) requires multifactor via DoD PKI (CAC/PIV) for network access \u2014 SSSD with pam_sss + smart-card, OCSP certificate revocation checking, and mapping certs to accounts. CIS has no smart-card/PKI requirement. Where MFA is mandated this can be CAT II rising to CAT I for privileged remote access.",
+      "check": "rpm -q sssd; pam stack includes pam_sss.so; /etc/sssd/sssd.conf has [pam] with pam_cert_auth=True; certificate_verification with ocsp_dgst; smartcard auth enabled (authselect with-smartcard on RHEL9).",
+      "fix": "Install sssd sssd-tools; configure /etc/sssd/sssd.conf [pam] pam_cert_auth=True and [sssd] certificate_verification = ocsp_dgst=sha1,ocsp_default_responder...; on RHEL9 'authselect enable-feature with-smartcard'; integrate DoD CA trust chain. Site-PKI dependent \u2014 flag for operator.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04 (sssd available; CAC integration site-specific)",
+      "automatable": false
+    },
+    {
+      "id": "STIG-SUDO-NOPASSWD",
+      "title": "sudo requires re-authentication (no NOPASSWD/!authenticate), uses tty, and pam_faillock-protected",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010380/010381/010382, RHEL-09-611150..611160, CCI-002227/CCI-000366) forbids NOPASSWD and !authenticate in sudoers, requires 'Defaults use_pty', 'Defaults logfile=/var/log/sudo.log', and that sudo escalations re-prompt. CIS recommends but STIG fails any NOPASSWD entry outright.",
+      "check": "grep -rE 'NOPASSWD|!authenticate' /etc/sudoers /etc/sudoers.d/ returns nothing; grep 'Defaults use_pty' and 'Defaults logfile' present; 'Defaults timestamp_timeout' sane.",
+      "fix": "Remove/neutralize NOPASSWD and !authenticate lines in /etc/sudoers.d/*; add 'Defaults use_pty' and 'Defaults logfile=/var/log/sudo.log' via /etc/sudoers.d/00-stig (validate with visudo -cf). Do not strip a NOPASSWD line that an automation account legitimately needs without operator sign-off.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-DISABLE-CTRLALTDEL",
+      "title": "Disable Ctrl-Alt-Del reboot and require auth for single-user/rescue/emergency targets",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-040170/040172, RHEL-09-211045..211050, CCI-000366) requires ctrl-alt-del.target masked and rescue/emergency systemd units to require the root password (sulogin). CIS does not require the rescue-target auth. Prevents physical reboot/rescue bypass.",
+      "check": "systemctl status ctrl-alt-del.target shows masked; /usr/lib/systemd/system/rescue.service and emergency.service ExecStart use --no-block? no \u2014 require sulogin (ExecStart=-/usr/lib/systemd/systemd-sulogin-shell). GUI: logout/ctrl-alt-del dconf disabled.",
+      "fix": "systemctl mask ctrl-alt-del.target; ensure rescue.service/emergency.service ExecStart=-/usr/lib/systemd/systemd-sulogin-shell rescue (default on RHEL); GUI: dconf set org.gnome.settings-daemon.plugins.media-keys logout ''.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-REMOVE-SERVICES",
+      "title": "Remove/disable unauthorized packages and services (telnet, rsh, ftp, tftp, xinetd, nis/ypbind, gssproxy, autofs, abrt, ctrl daemons)",
+      "severity": "CAT II",
+      "rationale": "STIG names specific packages that must be absent (RHEL-08-040000..040010, RHEL-09-215xxx, CCI-000381/CCI-000366): telnet-server, rsh-server, ftp, tftp-server, xinetd, ypserv/ypbind, talk, abrt*, gssproxy (if unused), and that no removable/unneeded service runs. CIS disables many but STIG requires specific packages REMOVED (not just stopped) and adds the abrt/crash-reporter prohibition.",
+      "check": "rpm -q / dpkg -l for: telnet-server, rsh-server, ypserv, tftp-server, xinetd, telnet, abrt-* \u2014 must be 'not installed'; systemctl shows no active inetd/xinetd/rsh/telnet/tftp.",
+      "fix": "dnf -y remove telnet-server rsh-server ypserv tftp-server xinetd abrt-cli abrt-addon-* (apt purge equivalents: telnetd rsh-server nis tftpd xinetd); systemctl mask any leftover sockets.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-SELINUX-ENFORCING",
+      "title": "SELinux (RHEL) Enforcing / targeted, or AppArmor (Ubuntu) enabled and enforcing all profiles",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010170/010171, RHEL-09-431010..431015, UBTU-22-431010, CCI-002165/CCI-002696) requires MAC enforced: SELinux=enforcing,targeted (or mls) on RHEL; AppArmor installed, enabled, and all profiles in enforce mode on Ubuntu. CIS L1 sometimes accepts permissive; STIG requires enforcing.",
+      "check": "RHEL: getenforce = Enforcing; grep '^SELINUXTYPE=targeted' and 'SELINUX=enforcing' /etc/selinux/config; sestatus consistent. Ubuntu: aa-status shows profiles loaded and 0 in complain mode; apparmor service active.",
+      "fix": "RHEL: set SELINUX=enforcing and SELINUXTYPE=targeted in /etc/selinux/config; setenforce 1 (and relabel if needed: fixfiles onboot). Ubuntu: apt install apparmor apparmor-utils; systemctl enable --now apparmor; aa-enforce /etc/apparmor.d/*.",
+      "applies_to": "RHEL/Rocky/Alma 8,9 (SELinux); Ubuntu 20.04/22.04 (AppArmor)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-FIREWALL-DENY",
+      "title": "Host firewall present with default-deny inbound and only approved ports (firewalld/nftables or ufw)",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-040100/040090, RHEL-09-251010..251040, UBTU-22-251010..251020, CCI-000366/CCI-002314) requires an enabled host firewall with a documented allowlist and default-deny, and that it rate-limits/denies by default. CIS recommends a firewall but STIG requires it active with default-deny and ties it to the PPSM allowlist.",
+      "check": "RHEL: firewall-cmd --state=running; default zone target DROP/REJECT; only approved services/ports. Ubuntu: ufw status = active, default deny incoming. nftables ruleset has a base drop policy.",
+      "fix": "RHEL: systemctl enable --now firewalld; firewall-cmd --set-default-zone=drop (or set zone target DROP); add only approved --add-service; --runtime-to-permanent. Ubuntu: ufw default deny incoming; ufw allow <approved>; ufw enable.",
+      "applies_to": "RHEL/Rocky/Alma 8,9 (firewalld/nftables); Ubuntu 20.04/22.04 (ufw)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-GUI-LOCK",
+      "title": "GUI screen lock after 15 min idle with lock-on-suspend (GNOME/dconf) \u2014 if a desktop is present",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-020030..020082, RHEL-09-271xxx, CCI-000057/CCI-000060) requires the graphical session to initiate a session lock at <=900s idle, lock-enabled, lock-delay 0, and a manual lock keybinding, enforced via locked dconf keys. CIS does not address GUI lock. Only applies when a graphical environment is installed.",
+      "check": "If GUI present: dconf org.gnome.desktop.session idle-delay<=900; org.gnome.desktop.screensaver lock-enabled=true, lock-delay=uint32 0; keys locked in /etc/dconf/db/local.d/locks/.",
+      "fix": "Write /etc/dconf/db/local.d/00-screensaver with idle-delay/lock-enabled/lock-delay; lock the keys; dconf update. Skip entirely on headless servers (mark N/A).",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04 (only if GNOME/desktop installed)",
+      "automatable": true
+    },
+    {
+      "id": "STIG-PAM-FIPS-HASH",
+      "title": "Password storage hashing uses SHA-512/yescrypt with sufficient rounds and no legacy MD5/DES in shadow",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-010120/010130/RHEL-09-611055..611075, CCI-000196/CCI-000803) requires all stored passwords hashed with FIPS-approved SHA-512 (or yescrypt where approved), pam_unix sha512, login.defs ENCRYPT_METHOD SHA512, and that no account in /etc/shadow still uses $1$ (MD5) or DES. CIS checks the method but STIG also requires remediating existing weak hashes.",
+      "check": "grep ENCRYPT_METHOD /etc/login.defs = SHA512; pam_unix lines use sha512; awk -F: of /etc/shadow shows no $1$ or 13-char DES hashes for active accounts; libuser.conf crypt_style sha512 (RHEL).",
+      "fix": "Set ENCRYPT_METHOD SHA512 in login.defs; ensure 'password sufficient pam_unix.so sha512 ...' in the password stack; set crypt_style = sha512 in /etc/libuser.conf; force password reset (chage -d 0) for any account with a legacy hash.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": true
+    },
+    {
+      "id": "STIG-INTERACTIVE-UID",
+      "title": "No duplicate/empty/UID-0-besides-root accounts; lock and noshell system accounts; min UID 1000",
+      "severity": "CAT II",
+      "rationale": "STIG (RHEL-08-020320/020331, RHEL-09-411xxx, CCI-000366/CCI-000764) requires only root has UID 0, no empty passwords (passwd -S), system accounts (UID<1000) have /sbin/nologin and are locked, and no duplicate UIDs/GIDs/usernames. CIS overlaps but STIG also requires interactive-user GECOS/home checks and the UID_MIN boundary alignment.",
+      "check": "awk -F: '$3==0' /etc/passwd lists only root; awk -F: '($2==\"\"||$2==\"!\")' for empty-password locks; system accounts (UID<1000, not root/sync/shutdown/halt) shell = nologin/false; no duplicate UIDs.",
+      "fix": "Lock and set nologin on offending system accounts (usermod -L -s /sbin/nologin <acct>); remove or fix any non-root UID-0 account; resolve duplicate UIDs; passwd -l accounts with empty passwords. Operator review required before locking accounts an app uses.",
+      "applies_to": "RHEL/Rocky/Alma 8,9; Ubuntu 20.04/22.04",
+      "automatable": false
+    }
+  ],
+  "deterministic_transforms": [
+    {
+      "id": "DT-SSHD-DROPIN",
+      "description": "Idempotently write a STIG sshd drop-in with FIPS ciphers/MACs/KEX and all session parameters, then validate and reload. On RHEL9 omit Ciphers/MACs/KEX (crypto-policy owns them) to avoid conflict.",
+      "trigger": "Controls STIG-SSH-CIPHERS, STIG-SSH-MACS, STIG-SSH-KEX, STIG-SSH-PARAMS, STIG-SSH-BANNER",
+      "implementation": "set -e; D=/etc/ssh/sshd_config.d; F=$D/00-stig.conf; mkdir -p $D; { echo '# STIG-managed'; if ! grep -qiE 'rhel' /etc/os-release || grep -qiE 'release 8' /etc/redhat-release 2>/dev/null; then echo 'Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr'; echo 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256'; echo 'KexAlgorithms ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256'; fi; printf '%s\\n' 'PermitRootLogin no' 'PermitEmptyPasswords no' 'PermitUserEnvironment no' 'ClientAliveInterval 600' 'ClientAliveCountMax 1' 'LoginGraceTime 60' 'MaxAuthTries 6' 'X11Forwarding no' 'IgnoreRhosts yes' 'HostbasedAuthentication no' 'StrictModes yes' 'GSSAPIAuthentication no' 'KerberosAuthentication no' 'Compression no' 'Banner /etc/issue.net'; } > $F; chmod 0600 $F; sshd -t && systemctl reload sshd 2>/dev/null || systemctl reload ssh; grep -q 'include' /etc/ssh/sshd_config 2>/dev/null || echo 'Include /etc/ssh/sshd_config.d/*.conf' | cat - /etc/ssh/sshd_config > /tmp/sc && mv /tmp/sc /etc/ssh/sshd_config",
+      "placement": "Drop-in file /etc/ssh/sshd_config.d/00-stig.conf; idempotent because the whole file is rewritten each run. Validate with sshd -t before reload so a bad value never breaks SSH."
+    },
+    {
+      "id": "DT-DOD-BANNER",
+      "description": "Write the verbatim DoD Standard Mandatory Notice and Consent Banner to /etc/issue, /etc/issue.net.",
+      "trigger": "Controls STIG-SSH-BANNER, STIG-CONSOLE-BANNER",
+      "implementation": "B='You are accessing a U.S. Government (USG) Information System (IS) that is provided for USG-authorized use only.\\n\\nBy using this IS (which includes any device attached to this IS), you consent to the following conditions:\\n\\n-The USG routinely intercepts and monitors communications on this IS for purposes including, but not limited to, penetration testing, COMSEC monitoring, network operations and defense, personnel misconduct (PM), law enforcement (LE), and counterintelligence (CI) investigations.\\n\\n-At any time, the USG may inspect and seize data stored on this IS.\\n\\n-Communications using, or data stored on, this IS are not private, are subject to routine monitoring, interception, and search, and may be disclosed or used for any USG-authorized purpose.\\n\\n-This IS includes security measures (e.g., authentication and access controls) to protect USG interests--not for your personal benefit or privacy.\\n\\n-Notwithstanding the above, using this IS does not constitute consent to PM, LE or CI investigative searching or monitoring of the content of privileged communications, or work product, related to personal representation or services by attorneys, psychotherapists, or clergy, and their assistants. Such communications and work product are private and confidential. See User Agreement for details.'; printf '%b\\n' \"$B\" > /etc/issue; printf '%b\\n' \"$B\" > /etc/issue.net; chmod 0644 /etc/issue /etc/issue.net",
+      "placement": "Overwrites /etc/issue and /etc/issue.net wholesale (idempotent). The GUI/dconf acknowledgement is handled separately by DT-DCONF-BANNER."
+    },
+    {
+      "id": "DT-PWQUALITY",
+      "description": "Idempotently set STIG pwquality keys in /etc/security/pwquality.conf using upsert (replace-or-append per key).",
+      "trigger": "Control STIG-PWQUALITY",
+      "implementation": "f=/etc/security/pwquality.conf; set_kv(){ k=$1; v=$2; if grep -qE \"^\\s*#?\\s*${k}\\s*=\" \"$f\"; then sed -ri \"s|^\\s*#?\\s*(${k})\\s*=.*|\\1 = ${v}|\" \"$f\"; else echo \"${k} = ${v}\" >> \"$f\"; fi; }; for kv in 'minlen 15' 'ucredit -1' 'lcredit -1' 'dcredit -1' 'ocredit -1' 'difok 8' 'maxrepeat 3' 'maxclassrepeat 4' 'minclass 4' 'dictcheck 1' 'enforce_for_root '; do set_kv ${kv}; done",
+      "placement": "Per-key upsert in /etc/security/pwquality.conf so re-runs converge. enforce_for_root is a bare directive (value empty). PAM stack wiring is done by DT-PAM-STACK."
+    },
+    {
+      "id": "DT-FAILLOCK-CONF",
+      "description": "Set pam_faillock policy via faillock.conf (RHEL 8.2+/9, Ubuntu 22.04) idempotently.",
+      "trigger": "Control STIG-FAILLOCK",
+      "implementation": "f=/etc/security/faillock.conf; [ -f \"$f\" ] || touch \"$f\"; set_kv(){ k=$1; v=$2; if grep -qE \"^\\s*#?\\s*${k}\\b\" \"$f\"; then sed -ri \"s|^\\s*#?\\s*${k}\\b.*|${k}${v:+ }${v}|\" \"$f\"; else echo \"${k}${v:+ }${v}\" >> \"$f\"; fi; }; set_kv deny 3; set_kv fail_interval 900; set_kv unlock_time 0; set_kv even_deny_root ''; set_kv silent ''; set_kv audit ''; set_kv dir /var/log/faillock; mkdir -p /var/log/faillock",
+      "placement": "/etc/security/faillock.conf. On RHEL9 also run 'authselect enable-feature with-faillock; authselect apply-changes'. On RHEL8 pre-8.2 and Ubuntu 20.04, fall back to editing pam.d directly / pam_tally2 (distro branch)."
+    },
+    {
+      "id": "DT-PAM-STACK",
+      "description": "Ensure pwquality, pwhistory, and faillock modules are wired into the PAM stack distro-correctly (authselect on RHEL9, direct edit on RHEL8/Ubuntu).",
+      "trigger": "Controls STIG-PWQUALITY, STIG-FAILLOCK, STIG-PWAGE",
+      "implementation": ". /etc/os-release; if [ \"$ID\" = ubuntu ]; then cp=/etc/pam.d/common-password; ca=/etc/pam.d/common-auth; grep -q pam_pwquality $cp || sed -ri '0,/pam_unix.so/s//pam_pwquality.so retry=3 enforce_for_root\\n&/' $cp; grep -q 'remember=24' $cp || sed -ri 's/(pam_unix.so.*)/\\1 remember=24/' $cp; grep -q pam_faillock $ca || { sed -ri '1ipassword-not-edited' $ca; }; else for sf in /etc/pam.d/system-auth /etc/pam.d/password-auth; do grep -q 'pam_pwhistory.so' $sf || sed -ri 's/^(password\\s+(requisite|required)\\s+pam_pwquality.so.*)/\\1\\npassword requisite pam_pwhistory.so use_authtok remember=24 retry=3/' $sf; done; fi",
+      "placement": "RHEL9: prefer 'authselect create-profile stig --base-on=sssd' or enable-feature, NOT raw edits (authselect overwrites). RHEL8/Ubuntu: edit /etc/pam.d/{system-auth,password-auth} or common-* with guard greps so re-runs are idempotent. Always back up the stack first; a broken PAM stack locks out login."
+    },
+    {
+      "id": "DT-LOGINDEFS-AGING",
+      "description": "Upsert password-aging, umask, and encrypt-method directives in /etc/login.defs and apply to existing interactive users.",
+      "trigger": "Controls STIG-PWAGE, STIG-UMASK, STIG-PAM-FIPS-HASH",
+      "implementation": "f=/etc/login.defs; up(){ k=$1; v=$2; if grep -qE \"^\\s*#?\\s*${k}\\b\" $f; then sed -ri \"s|^\\s*#?\\s*${k}\\b.*|${k}\\t${v}|\" $f; else printf '%s\\t%s\\n' \"$k\" \"$v\" >> $f; fi; }; up PASS_MAX_DAYS 60; up PASS_MIN_DAYS 1; up PASS_WARN_AGE 7; up UMASK 077; up ENCRYPT_METHOD SHA512; up SHA_CRYPT_MIN_ROUNDS 5000; awk -F: '$3>=1000 && $7!~/(nologin|false)/{print $1}' /etc/passwd | while read u; do chage -M 60 -m 1 -W 7 \"$u\"; done",
+      "placement": "Tab-delimited upsert into /etc/login.defs; chage loop bounded to UID>=1000 interactive accounts only so system/service accounts are untouched."
+    },
+    {
+      "id": "DT-AUDIT-RULES",
+      "description": "Install the canonical STIG audit ruleset (syscall groups + watches) plus a generated privileged-command file, then load. The immutable -e 2 goes in a separate 99-finalize file written LAST.",
+      "trigger": "Controls STIG-AUDIT-SYSCALLS, STIG-AUDIT-PRIVILEGED, STIG-AUDIT-SUDO, STIG-AUDIT-IMMUTABLE",
+      "implementation": "d=/etc/audit/rules.d; mkdir -p $d; cat > $d/stig.rules <<'EOF'\n## time-change\n-a always,exit -F arch=b64 -S adjtimex,settimeofday -F key=time-change\n-a always,exit -F arch=b64 -S clock_settime -F a0=0x0 -F key=time-change\n-w /etc/localtime -p wa -k time-change\n## identity\n-w /etc/passwd -p wa -k identity\n-w /etc/group -p wa -k identity\n-w /etc/gshadow -p wa -k identity\n-w /etc/shadow -p wa -k identity\n-w /etc/security/opasswd -p wa -k identity\n## MAC-policy (SELinux; swap to /etc/apparmor.d on Ubuntu)\n-w /etc/selinux/ -p wa -k MAC-policy\n-w /usr/share/selinux/ -p wa -k MAC-policy\n## logins\n-w /var/log/lastlog -p wa -k logins\n-w /var/run/faillock -p wa -k logins\n## perm_mod\n-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=4294967295 -k perm_mod\n-a always,exit -F arch=b64 -S chown,fchown,fchownat,lchown -F auid>=1000 -F auid!=4294967295 -k perm_mod\n-a always,exit -F arch=b64 -S setxattr,lsetxattr,fsetxattr,removexattr,lremovexattr,fremovexattr -F auid>=1000 -F auid!=4294967295 -k perm_mod\n## access (unauthorized)\n-a always,exit -F arch=b64 -S creat,open,openat,truncate,ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=4294967295 -k access\n-a always,exit -F arch=b64 -S creat,open,openat,truncate,ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=4294967295 -k access\n## mounts\n-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts\n## delete\n-a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat -F auid>=1000 -F auid!=4294967295 -k delete\n## modules\n-w /sbin/insmod -p x -k modules\n-w /sbin/rmmod -p x -k modules\n-w /sbin/modprobe -p x -k modules\n-a always,exit -F arch=b64 -S init_module,finit_module,delete_module -F auid>=1000 -F auid!=4294967295 -k module_chng\n## sudo/su/privilege tools\n-w /etc/sudoers -p wa -k identity\n-w /etc/sudoers.d/ -p wa -k identity\n-a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged-priv_change\n-a always,exit -F path=/usr/bin/su -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged-priv_change\n-a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged-passwd\nEOF\nfind / -xdev \\( -perm -4000 -o -perm -2000 \\) -type f 2>/dev/null | while read b; do echo \"-a always,exit -F path=$b -F perm=x -F auid>=1000 -F auid!=4294967295 -k privileged\"; done > $d/stig-privileged.rules; printf -- '-e 2\\n' > $d/99-finalize.rules; augenrules --load 2>/dev/null || true",
+      "placement": "/etc/audit/rules.d/stig.rules + stig-privileged.rules; '-e 2' isolated in 99-finalize.rules so augenrules concatenates it LAST. On Ubuntu rewrite the MAC-policy watch to -w /etc/apparmor.d/ and add b32 variants. Immutability (and thus any later change) requires a reboot \u2014 gate -e 2 behind an explicit finalize flag."
+    },
+    {
+      "id": "DT-SYSCTL",
+      "description": "Write all STIG kernel+network sysctls into a single drop-in and apply, ensuring both .all and .default net keys are present.",
+      "trigger": "Controls STIG-SYSCTL-KERNEL, STIG-SYSCTL-NET",
+      "implementation": "cat > /etc/sysctl.d/99-stig.conf <<'EOF'\nkernel.randomize_va_space = 2\nkernel.kptr_restrict = 1\nkernel.dmesg_restrict = 1\nkernel.yama.ptrace_scope = 1\nkernel.perf_event_paranoid = 2\nkernel.kexec_load_disabled = 1\nkernel.unprivileged_bpf_disabled = 1\nfs.suid_dumpable = 0\nfs.protected_hardlinks = 1\nfs.protected_symlinks = 1\nnet.ipv4.conf.all.accept_redirects = 0\nnet.ipv4.conf.default.accept_redirects = 0\nnet.ipv4.conf.all.send_redirects = 0\nnet.ipv4.conf.default.send_redirects = 0\nnet.ipv4.conf.all.accept_source_route = 0\nnet.ipv4.conf.default.accept_source_route = 0\nnet.ipv4.conf.all.secure_redirects = 0\nnet.ipv4.conf.default.secure_redirects = 0\nnet.ipv4.conf.all.rp_filter = 1\nnet.ipv4.conf.default.rp_filter = 1\nnet.ipv4.conf.all.log_martians = 1\nnet.ipv4.conf.default.log_martians = 1\nnet.ipv4.icmp_echo_ignore_broadcasts = 1\nnet.ipv4.tcp_syncookies = 1\nnet.ipv6.conf.all.accept_redirects = 0\nnet.ipv6.conf.default.accept_redirects = 0\nnet.ipv6.conf.all.accept_source_route = 0\nnet.ipv6.conf.default.accept_source_route = 0\nnet.ipv6.conf.all.accept_ra = 0\nnet.ipv6.conf.default.accept_ra = 0\nEOF\nsysctl --system >/dev/null",
+      "placement": "Single high-numbered drop-in /etc/sysctl.d/99-stig.conf overrides earlier files; rewritten whole each run (idempotent). Engine should grep earlier drop-ins / sysctl.conf for conflicting lower values and comment them out if a stricter floor is needed."
+    },
+    {
+      "id": "DT-TMOUT-UMASK-PROFILE",
+      "description": "Drop TMOUT and umask enforcement into /etc/profile.d (covers shells that don't read login.defs umask).",
+      "trigger": "Controls STIG-TMOUT, STIG-UMASK",
+      "implementation": "printf '%s\\n' 'TMOUT=600' 'readonly TMOUT' 'export TMOUT' > /etc/profile.d/99-stig-tmout.sh; chmod 0644 /etc/profile.d/99-stig-tmout.sh; printf '%s\\n' 'umask 077' > /etc/profile.d/99-stig-umask.sh; chmod 0644 /etc/profile.d/99-stig-umask.sh",
+      "placement": "/etc/profile.d/*.sh, sourced by interactive login shells; full-file overwrite is idempotent. Does not affect non-interactive/cron shells (intended)."
+    },
+    {
+      "id": "DT-CRYPTO-POLICY-FIPS",
+      "description": "Set RHEL system-wide crypto policy to FIPS (reinstalling crypto-policies first to repair any back-end drift). Reboot-affecting via kernel fips only; crypto-policy itself takes effect after service restart.",
+      "trigger": "Controls STIG-CRYPTO-POLICY, STIG-TLS-MINPROTO, STIG-FIPS-KERNEL (userspace half)",
+      "implementation": ". /etc/os-release; case \"$ID\" in rhel|rocky|almalinux|centos) dnf -y reinstall crypto-policies >/dev/null 2>&1 || true; update-crypto-policies --set FIPS; systemctl try-restart sshd 2>/dev/null || true ;; *) echo 'Ubuntu: FIPS via Ubuntu Pro (pro enable fips-updates), no crypto-policies' >&2 ;; esac",
+      "placement": "Runs update-crypto-policies on RHEL family only; idempotent (setting FIPS twice is a no-op). Kernel fips=1 (fips-mode-setup --enable) is a SEPARATE, flag-gated, reboot-required step \u2014 keep it out of the default automated run to avoid bricking remote hosts."
+    },
+    {
+      "id": "DT-DCONF-BANNER",
+      "description": "Configure GDM login banner + acknowledgement and screen lock via dconf, only when a graphical stack is present.",
+      "trigger": "Controls STIG-CONSOLE-BANNER (GUI), STIG-GUI-LOCK",
+      "implementation": "command -v dconf >/dev/null 2>&1 && [ -d /etc/dconf/db ] || exit 0; mkdir -p /etc/dconf/db/gdm.d /etc/dconf/db/local.d/locks; cat > /etc/dconf/db/gdm.d/01-stig <<'EOF'\n[org/gnome/login-screen]\nbanner-message-enable=true\nbanner-message-text='You are accessing a U.S. Government (USG) Information System (IS) that is provided for USG-authorized use only. By using this IS you consent to monitoring, interception, search, and seizure as described in the full DoD notice.'\nEOF\ncat > /etc/dconf/db/local.d/00-stig-screensaver <<'EOF'\n[org/gnome/desktop/session]\nidle-delay=uint32 900\n[org/gnome/desktop/screensaver]\nlock-enabled=true\nlock-delay=uint32 0\nEOF\nprintf '%s\\n' '/org/gnome/desktop/session/idle-delay' '/org/gnome/desktop/screensaver/lock-enabled' '/org/gnome/desktop/screensaver/lock-delay' > /etc/dconf/db/local.d/locks/00-stig; dconf update",
+      "placement": "Guarded exit 0 when no dconf/desktop, so it is a no-op on headless servers (correctly N/A). Keys are locked so users cannot relax them. dconf update compiles the DB."
+    },
+    {
+      "id": "DT-REMOVE-PACKAGES",
+      "description": "Remove STIG-prohibited packages distro-aware, only if installed.",
+      "trigger": "Control STIG-REMOVE-SERVICES",
+      "implementation": ". /etc/os-release; RH='telnet-server rsh-server ypserv tftp-server xinetd telnet abrt-cli abrt-addon-ccpp abrt-addon-kerneloops gssproxy'; UB='telnetd rsh-server rsh-redone-server nis tftpd-hpa xinetd'; if command -v dnf >/dev/null; then for p in $RH; do rpm -q $p >/dev/null 2>&1 && dnf -y remove $p; done; else for p in $UB; do dpkg -l $p 2>/dev/null | grep -q '^ii' && apt-get -y purge $p; done; fi",
+      "placement": "Conditional per-package removal (checks installed state first) so the run is idempotent and emits no errors for absent packages. gssproxy/abrt removal should be flag-reviewed if any workload depends on them."
+    },
+    {
+      "id": "DT-CHRONY",
+      "description": "Enforce chrony with maxpoll bound and no-serve port, distro-aware config path.",
+      "trigger": "Control STIG-CHRONY-AUTH",
+      "implementation": ". /etc/os-release; if command -v dnf >/dev/null; then dnf -y install chrony >/dev/null; cf=/etc/chrony.conf; else apt-get -y install chrony >/dev/null; cf=/etc/chrony/chrony.conf; fi; sed -ri 's/^(server|pool)\\s+(\\S+)(.*)$/\\1 \\2 iburst maxpoll 16/' $cf; grep -q '^port 0' $cf || echo 'port 0' >> $cf; grep -q '^cmdport 0' $cf || echo 'cmdport 0' >> $cf; systemctl enable --now chronyd 2>/dev/null || systemctl enable --now chrony; systemctl disable --now systemd-timesyncd 2>/dev/null || true; systemctl disable --now ntpd 2>/dev/null || true",
+      "placement": "Edits the distro-correct chrony.conf; appends port/cmdport 0 only if absent (idempotent). Operator must replace default pool with authorized DoD/authoritative servers \u2014 engine should template that list, not hardcode public pools."
+    },
+    {
+      "id": "DT-JOURNALD-LOGPERMS",
+      "description": "Persist+compress journald and lock down audit log permissions.",
+      "trigger": "Controls STIG-JOURNALD-PERSIST, STIG-LOG-PERMS, STIG-AUDITD-INSTALL",
+      "implementation": "f=/etc/systemd/journald.conf; up(){ k=$1;v=$2; if grep -qE \"^\\s*#?\\s*${k}=\" $f; then sed -ri \"s|^\\s*#?\\s*${k}=.*|${k}=${v}|\" $f; else echo \"${k}=${v}\" >> $f; fi; }; up Storage persistent; up Compress yes; up ForwardToSyslog yes; mkdir -p /var/log/journal; systemctl restart systemd-journald; a=/etc/audit/auditd.conf; au(){ k=$1;v=$2; sed -ri \"s|^\\s*#?\\s*(${k})\\s*=.*|\\1 = ${v}|\" $a || true; grep -qE \"^\\s*${k}\\s*=\" $a || echo \"${k} = ${v}\" >> $a; }; au log_file_mode 0600; au log_group root; au space_left_action email; au admin_space_left_action single; au disk_full_action HALT; au disk_error_action HALT; au max_log_file_action ROTATE; chmod 0600 /var/log/audit/audit.log 2>/dev/null; chmod 0700 /var/log/audit 2>/dev/null; systemctl restart auditd 2>/dev/null || service auditd restart 2>/dev/null || true",
+      "placement": "journald.conf and auditd.conf upserts; note auditd cannot be restarted with systemctl on some RHEL builds (use 'service auditd restart' fallback, already included). Run BEFORE DT-AUDIT-RULES sets -e 2, since immutability blocks later auditd reconfiguration."
+    }
+  ]
+}

@@ -1,0 +1,484 @@
+{
+  "domains": [
+    {
+      "key": "cis_hardening",
+      "display_name": "CIS / Security Baseline Hardening",
+      "min_confidence": 0.45,
+      "signatures": [
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bCIS\\b(?!CO)",
+          "weight": 5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)CIS[- ]?(Benchmark|Level\\s*[12]|control)",
+          "weight": 6
+        },
+        {
+          "kind": "regex",
+          "pattern": "Ensure\\s+[A-Z0-9a-z]",
+          "weight": 4.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "pam_pwquality",
+          "weight": 5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "pwquality.conf",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "auditd",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "auditctl",
+          "weight": 3.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "audit.rules",
+          "weight": 3.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "sshd_config",
+          "weight": 3.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bsysctl\\b",
+          "weight": 2.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "sysctl.conf",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bgpgcheck\\s*=\\s*1",
+          "weight": 4
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bfips\\b",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bfips=1|fips-mode-setup",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "remediation",
+          "weight": 2
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bremediate\\b",
+          "weight": 2.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)hardening|harden\\b",
+          "weight": 3
+        },
+        {
+          "kind": "keyword",
+          "pattern": "STIG",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "OpenSCAP",
+          "weight": 4.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "oscap",
+          "weight": 4
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)benchmark",
+          "weight": 1.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bumask\\s+0?[0-7]{3}",
+          "weight": 1.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "Lynis",
+          "weight": 3.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)disable\\s+(unused|legacy)\\s+(service|protocol|filesystem)",
+          "weight": 2.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)password\\s+(complexity|aging|expiration)",
+          "weight": 2
+        },
+        {
+          "kind": "keyword",
+          "pattern": "PASS_MAX_DAYS",
+          "weight": 3
+        },
+        {
+          "kind": "keyword",
+          "pattern": "login.defs",
+          "weight": 3
+        }
+      ]
+    },
+    {
+      "key": "forensic",
+      "display_name": "Forensic Acquisition / Incident Response",
+      "min_confidence": 0.45,
+      "signatures": [
+        {
+          "kind": "regex",
+          "pattern": "(?i)chain[\\s_-]?of[\\s_-]?custody",
+          "weight": 7
+        },
+        {
+          "kind": "keyword",
+          "pattern": "dc3dd",
+          "weight": 6.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "dcfldd",
+          "weight": 6.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "\\bLiME\\b|lime\\.ko|insmod\\s+lime",
+          "weight": 6.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)sha256sum\\b.*\\bverify|sha256sum\\s+-c|sha256sum.*verify",
+          "weight": 5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)blockdev\\s+--setro",
+          "weight": 6
+        },
+        {
+          "kind": "keyword",
+          "pattern": "volatility",
+          "weight": 6
+        },
+        {
+          "kind": "keyword",
+          "pattern": "vol.py",
+          "weight": 4.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)write[- ]?block(er|ed|ing)?",
+          "weight": 5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)read[- ]?only\\s+(mount|acquisition|image)",
+          "weight": 3.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "ewfacquire",
+          "weight": 5.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "\\.E0?1\\b|EnCase|ewf",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "guymager",
+          "weight": 5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)forensic(s|ally)?",
+          "weight": 3.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bacquisition\\b",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)evidence\\b",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)hash\\s+verif(y|ication)|verify\\s+hash",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bmemory\\s+(dump|capture|image|acquisition)",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "/proc/kcore",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "AVML",
+          "weight": 5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bimaging\\b\\s+(disk|drive|device)",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "if=/dev/(sd|nvme|mapper).*\\bconv=(noerror|sync)",
+          "weight": 3.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "examiner",
+          "weight": 2.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "incident response",
+          "weight": 3.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bIR\\s+(triage|collection|playbook)",
+          "weight": 3
+        },
+        {
+          "kind": "keyword",
+          "pattern": "Autopsy",
+          "weight": 3.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "tcpdump",
+          "weight": 1.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)preserve\\s+(evidence|integrity|timestamps)",
+          "weight": 3
+        },
+        {
+          "kind": "keyword",
+          "pattern": "md5sum",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "key": "installer",
+      "display_name": "Linux OS Install / Provisioning Automation",
+      "min_confidence": 0.45,
+      "signatures": [
+        {
+          "kind": "keyword",
+          "pattern": "kickstart",
+          "weight": 6
+        },
+        {
+          "kind": "regex",
+          "pattern": "%packages\\b",
+          "weight": 6
+        },
+        {
+          "kind": "regex",
+          "pattern": "%post\\b|%pre\\b",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "preseed",
+          "weight": 6
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)d-i\\s+\\w+/\\w+",
+          "weight": 4.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "autoinstall",
+          "weight": 6
+        },
+        {
+          "kind": "keyword",
+          "pattern": "pacstrap",
+          "weight": 6.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "debootstrap",
+          "weight": 6.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "cloud-init",
+          "weight": 5.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "#cloud-config",
+          "weight": 6
+        },
+        {
+          "kind": "keyword",
+          "pattern": "parted",
+          "weight": 4.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "\\bmkfs(\\.\\w+)?\\b",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "grub-install",
+          "weight": 5.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "grub-mkconfig",
+          "weight": 4
+        },
+        {
+          "kind": "regex",
+          "pattern": "update-grub|grub2-mkconfig",
+          "weight": 4
+        },
+        {
+          "kind": "keyword",
+          "pattern": "genfstab",
+          "weight": 5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "arch-chroot",
+          "weight": 5.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bpvcreate|vgcreate|lvcreate",
+          "weight": 3.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bmkswap\\b",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bsgdisk\\b|sfdisk",
+          "weight": 3.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "yum install",
+          "weight": 1.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "dnf install",
+          "weight": 1.5
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)apt(-get)?\\s+install",
+          "weight": 1
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bbootloader\\b",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bprovision(ing)?\\b",
+          "weight": 2.5
+        },
+        {
+          "kind": "keyword",
+          "pattern": "%end",
+          "weight": 2
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)\\bnocloud\\b",
+          "weight": 4
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)anaconda\\b",
+          "weight": 3
+        },
+        {
+          "kind": "regex",
+          "pattern": "(?i)wipefs\\b",
+          "weight": 2.5
+        }
+      ]
+    },
+    {
+      "key": "generic",
+      "display_name": "Generic Shell Script (fallback)",
+      "min_confidence": 0,
+      "signatures": [
+        {
+          "kind": "shebang",
+          "pattern": "#!/bin/sh",
+          "weight": 0.5
+        },
+        {
+          "kind": "shebang",
+          "pattern": "#!/bin/bash",
+          "weight": 0.5
+        },
+        {
+          "kind": "shebang",
+          "pattern": "#!/usr/bin/env bash",
+          "weight": 0.5
+        },
+        {
+          "kind": "shebang",
+          "pattern": "#!/usr/bin/env python3",
+          "weight": 0.5
+        },
+        {
+          "kind": "shebang",
+          "pattern": "#!/bin/zsh",
+          "weight": 0.5
+        }
+      ]
+    }
+  ],
+  "data_model": "All dataclasses are `@dataclass` from the `dataclasses` module. Use `field(default_factory=list)` for every mutable list field. APEX runs the pipeline classify -> select Rubric -> apply deterministic Transforms -> optional LLM pass guided by Rubric.llm_guidance -> emit ElevationResult.\n\nfrom dataclasses import dataclass, field\nfrom typing import Callable, Optional\n\n@dataclass(frozen=True)\nclass Signature:\n    kind: str            # 'shebang' | 'keyword' | 'regex'\n    pattern: str         # literal substring (shebang/keyword) or python re pattern (regex)\n    weight: float        # positive contribution to the domain score when matched\n\n@dataclass(frozen=True)\nclass MatchedSignature:\n    domain: str          # which domain this signature belongs to\n    signature: Signature # the signature that fired\n    match_count: int     # how many times it matched in the script (capped, see schema_notes)\n    contributed: float   # actual weight added after the per-signature cap\n\n@dataclass\nclass ClassificationResult:\n    domain: str                              # winning domain key, or 'generic' on low-confidence/tie\n    confidence: float                        # normalized score of the winning domain in [0,1]\n    scores_by_domain: dict[str, float]       # domain key -> normalized confidence in [0,1]\n    matched_signatures: list[MatchedSignature] = field(default_factory=list)\n    raw_scores: dict[str, float] = field(default_factory=dict)  # pre-normalization weight sums\n    fell_through: bool = False               # True when no domain met its min_confidence\n\n@dataclass\nclass Control:\n    id: str                  # e.g. 'CIS-5.2.1' or 'IR-MEM-01'\n    title: str               # human label\n    description: str         # what compliant looks like\n    severity: str            # 'low' | 'medium' | 'high' | 'critical'\n    rationale: str = \"\"      # why it matters\n    check_hint: str = \"\"     # how to detect compliance in the script (regex/keyword/intent)\n    fix_hint: str = \"\"       # canonical remediation snippet or guidance\n\n@dataclass\nclass Transform:\n    id: str                  # stable id, referenced by ElevationResult.applied_transforms\n    description: str         # one-line intent\n    applies_when: Callable[[str], bool]   # predicate over original script text; gate before running\n    apply: Callable[[str], str]           # pure str->str rewrite; deterministic, idempotent\n    control_ids: list[str] = field(default_factory=list)  # Controls this transform satisfies\n\n@dataclass\nclass Rubric:\n    domain: str                                  # matches a domain key\n    target_standard: str                         # e.g. 'CIS Distribution-Independent Linux Benchmark v2.0', 'SWGDE/NIST SP 800-86', 'distro autoinstall best practice'\n    controls: list[Control] = field(default_factory=list)\n    deterministic_transforms: list[Transform] = field(default_factory=list)\n    llm_guidance: str = \"\"                        # system-prompt fragment steering the LLM elevation pass for this domain\n\n@dataclass\nclass ElevationResult:\n    original: str                                # input script source\n    elevated: str                                # rewritten/hardened script source\n    diff: str                                     # unified diff original -> elevated\n    applied_transforms: list[str] = field(default_factory=list)  # Transform.id values that fired\n    report_md: str = \"\"                          # markdown report: what changed, controls addressed, residual gaps\n    classification: Optional[ClassificationResult] = None        # the classification that selected the rubric",
+  "schema_notes": "SCORING (per-domain raw score):\n1. Normalize the script: lowercase a copy for case-insensitive keyword matching, but run regex signatures with their own inline flags (most discriminators above carry (?i)). Keep the original for shebang detection (only the first non-blank line is checked for kind=='shebang').\n2. For each signature in a domain, test it against the script:\n   - shebang: exact-prefix match on line 1 only.\n   - keyword: literal substring search (count occurrences).\n   - regex: re.findall over the whole text (count matches).\n3. Per-signature contribution = weight * min(match_count, CAP) where CAP=3. The cap stops a single repeated token (e.g. 'sysctl' x40) from dominating; a real domain script trips several distinct signatures, not one repeated 100x. raw_score[domain] = sum of all per-signature contributions.\n\nNORMALIZATION (raw -> confidence in [0,1]):\n4. Use a saturating normalizer so confidence is comparable across domains regardless of script length: confidence[domain] = raw / (raw + K), with K=8.0 (tuned so that hitting ~2-3 strong discriminators, e.g. two weight-6 signatures, lands ~0.6-0.7). This is bounded, monotonic, and never exceeds 1.0. scores_by_domain stores these normalized values; raw_scores keeps the sums for debugging.\n5. The 'generic' domain's raw score comes only from shebang signatures (max ~0.5 weight), so its normalized confidence is structurally tiny (<0.07). Generic is the floor, not a competitor \u2014 it wins by fall-through, not by score.\n\nDECISION (winner selection):\n6. Candidates = the three real domains (cis_hardening, forensic, installer). Let top and second be the two highest normalized confidences among candidates.\n7. Claim top.domain iff: top.confidence >= that domain's min_confidence (0.45) AND (top.confidence - second.confidence) >= MARGIN where MARGIN=0.10. The absolute-confidence gate ensures real signal; the relative-margin gate ensures the top domain is meaningfully ahead.\n8. Otherwise fall through to 'generic': set domain='generic', fell_through=True, confidence = generic's own (tiny) normalized score, but still return the full scores_by_domain so callers can see the near-miss. A tie (within MARGIN) or an everything-below-threshold script both resolve to generic \u2014 never guess between two contested domains.\n\nANTI-COLLISION (why the four domains stay separable):\n- Shared primitives are scoped, not raw. dd-style imaging is only forensic when paired with read-only intent (conv=noerror/sync from /dev/sd|nvme), while installer disk ops are partition/format/bootloader verbs (parted, mkfs, grub-install) that forensic acquisition never runs (it images, it does not provision). \n- sha256sum collides naturally, so forensic only scores it under the '...verify' / '-c' / 'hash verification' framing; a bare checksum in an installer doesn't pull score toward forensic.\n- CIS is dominated by config-audit/assertion language ('Ensure ', CIS-Benchmark, pam_pwquality, auditd, login.defs) that does not appear in acquisition or install flows.\n- The biggest discriminators per domain (weight >= 6) are domain-exclusive tokens \u2014 chain_of_custody/dc3dd/dcfldd/LiME (forensic), pacstrap/debootstrap/kickstart/%packages/cloud-config (installer), CIS-Benchmark/pam_pwquality/OpenSCAP-tier terms (cis) \u2014 so a genuine script of one kind lands one strong hit the others cannot match, and the 0.10 margin gate cleanly separates it. Low-signal or mixed scripts (e.g. a provisioning script that also hardens) that don't clear the margin correctly degrade to generic rather than mislabel."
+}

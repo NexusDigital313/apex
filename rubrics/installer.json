@@ -1,0 +1,389 @@
+{
+  "domain": "installer",
+  "target_standard": "Production-grade automated/interactive OS provisioning: Kickstart (RHEL/Fedora/Rocky/Alma), Debian preseed + Ubuntu Subiquity autoinstall/cloud-init, Arch pacstrap installer, SUSE AutoYaST, generic cloud-init; aligned to vendor reference docs, CIS-style secure post-install, and reproducible-config / dry-run / fail-closed automation discipline.",
+  "summary": "This rubric grades any Linux install/provisioning script on its journey from a manual or half-baked state to production-grade unattended OR interactive provisioning. It is family-agnostic at the top (a single dispatcher selects the right backend) and family-specific in the controls: Kickstart %pre/%packages/%post with LVM/LUKS, network and bootloader; Debian preseed and Ubuntu Subiquity autoinstall (cloud-init user-data + autoinstall YAML, storage direct/lvm/zfs, late-commands); a scripted Arch pacstrap/genfstab/arch-chroot installer; AutoYaST XML for SUSE; and generic cloud-init. A core design axiom runs through every control: the script must run EITHER fully unattended (no prompts, fail-closed) OR fully interactive (whiptail/dialog TUI), selected deterministically by flag/env, and a DESTRUCTIVE disk operation must never proceed without either an explicit interactive confirmation or an explicit --assume-yes. Controls are split into (a) safety/robustness invariants that apply to every backend \u2014 preflight checks, destructive-op guard, idempotency, logging, exit codes, dry-run, network retry, checksum verification, generated-config validation, deterministic output, secrets hygiene \u2014 and (b) per-family generation correctness. The deterministic_transforms are drop-in, copy-pasteable shell/YAML/ks fragments (flag plumbing, preflight block, whiptail menu, confirm-destroy guard, LUKS partition flow, config-validator gate, autoinstall/kickstart scaffolds, secure %post/late-commands hooks) that an automated pass can inject to satisfy the controls without an LLM. The LLM is reserved for judgement calls: mapping a vague free-text request onto the correct family + storage layout, writing the human-readable TUI copy, and reconciling conflicting partition/security intent.",
+  "llm_guidance": "Use the deterministic_transforms for everything mechanical \u2014 flag plumbing, the preflight/retry/logging scaffolds, the confirm-destroy guard, validators, and the family scaffolds are copy-paste injections that need no model judgement and should NOT be re-derived per run. Reserve the LLM for the genuinely ambiguous decisions:\\n\\n1. Family + path selection from intent. Map a vague human request ('build me a hardened Ubuntu server', 'encrypted Arch laptop', 'PXE a rack of Rockys') onto FAMILY, the correct sub-path (Subiquity autoinstall vs legacy preseed; systemd-boot vs GRUB), STORAGE layout (direct/lvm/zfs), and ENCRYPT. State the assumption in one line and proceed; only stop if the choice is irreversible with no defensible default.\\n\\n2. Storage/security reconciliation. When the request implies conflicting intent (e.g. 'ZFS root' + 'full-disk LUKS', or 'minimal' + 'fail2ban+desktop'), pick the coherent production default (ZFS native encryption instead of stacking LUKS; keep minimal and drop the desktop), note the tradeoff inline, and encode it in the declarative config \u2014 don't emit a contradictory answer file.\\n\\n3. Human-facing TUI copy. Write the whiptail titles, prompts, and the final review screen so a tired operator at 2am understands exactly what will be destroyed. The skeleton is fixed; the wording is judgement.\\n\\n4. Mode-appropriateness review. Before shipping, confirm the script cannot hang unattended (no unguarded read/prompt outside MODE=interactive) and cannot silently destroy in a human session (every destructive op crosses confirm_destroy). This is the one invariant to verify by reading control flow, not by pattern match.\\n\\n5. Secrets sourcing. Decide where each secret comes from per context (env/keyfile/TPM/prompt) \u2014 never let a passphrase or unhashed password land in a committed/served config. When unsure, prefer prompting in interactive and requiring an env var (LUKS_PASSPHRASE, ROOT_PW) in unattended, hashing before injection.\\n\\nAlways fail closed: if you cannot satisfy a critical control (PROV-001/002/003/004/007/008/009), refuse to emit an apply-capable script and say why, rather than shipping something that prompts-forever or wipes-the-wrong-disk. Treat --dry-run output as the review surface \u2014 it must show the resolved disk, the full rendered config, and the validator verdict before any real run.\n\nAuditor addendum \u2014 also ensure: Bootability verification post-install: confirm bootloader actually installs and the system is bootable (grub2-install + grub2-mkconfig / bootctl install / efibootmgr entry creation, plus removable fallback \\EFI\\BOOT\\BOOTX64.EFI). The single most common silent unattended-install failure and there is no control for it.; fstab correctness: entries must be by UUID/PARTUUID (Arch genfstab -U), never bare /dev/sdX, to survive device reordering; no control validates generated/written fstab identity stability.; Secure Boot / shim / MOK handling: enrollment of keys, shim+grub signing path, and MOK for custom kernel/DKMS or TPM-bound LUKS; entirely absent despite modern UEFI being the default.; LUKS unattended-unlock strategy: rubric mandates LUKS but specifies no auto-unlock mechanism (systemd-cryptenroll TPM2, Clevis/Tang, or keyfile in initramfs). A fully-unattended LUKS host that prompts for a passphrase every boot is non-functional unattended.; Cleanup/abort trap (trap ... EXIT/INT/TERM): unmount target, close LUKS mappings, deactivate VGs, remove temp files on failure so a half-run never leaves the disk in a mapped/mounted state.; Concurrency lock (flock) to prevent two provisioning runs racing the same target disk.; machine-id reset and SSH host-key regeneration per host: golden-image / repeated-run provisioning must clear /etc/machine-id and regenerate /etc/ssh/ssh_host_* so the fleet doesn't ship duplicate identities (DHCP collisions, SSH MITM warnings).; SELinux / AppArmor enforcing state after install (Kickstart `selinux --enforcing`, AutoYaST/autoinstall equivalents) \u2014 mandatory for any 'CIS-style' claim, not present.; Filesystem mount-option hardening: nodev/nosuid/noexec on /tmp, /var/tmp, /dev/shm, separate /home,/var,/var/log partitions \u2014 explicit CIS benchmark items, absent.; Persistent repo/package trust config written into the target: gpgcheck=1, repo_gpgcheck, imported repo signing keys, pinned mirror \u2014 PROV-008 covers the ISO/key download but not the trust config baked into the installed system.; Reproducibility beyond text-determinism: pinned package versions or a snapshot/point-in-time mirror. Summary claims 'reproducible-config' but identical config text over a moving mirror yields non-reproducible installed systems.; Reboot/eject behavior to break PXE/ISO re-install loops (Kickstart `reboot --eject`, autoinstall shutdown semantics).; Kickstart section hygiene: every %pre/%packages/%post/%addon must end with %end (top syntactic failure), plus %packages risks like --ignoremissing masking missing-package errors and @^environment group selection.; Network/DNS persistence correctness: generated persistent config matches the target's manager (netplan vs NetworkManager vs systemd-networkd vs ifupdown), predictable interface naming, and resolver config \u2014 preflight checks reachability but no control validates the persisted network config.; Time/clock/locale correctness: timezone, NTP/chrony enablement, RTC-in-UTC, keymap/locale \u2014 affects TLS validity, logs, and cron; not covered.; Btrfs subvolume + snapshot layout (snapper) for Fedora/SUSE defaults and swap/zram/resume sizing \u2014 storage-layout correctness gaps.; Install transcript / artifact retention on the target and console (serial console redirect for headless PXE), with secret redaction \u2014 referenced obliquely but no dedicated logging-completeness control.; Mid-install failure recovery / safe-abort state: what the disk and system look like after partitioning fails, and how to resume vs restart cleanly.; GRUB/bootloader password and single-user-mode / recovery-shell protection \u2014 CIS item, absent.; cloud-init lifecycle controls: datasource pinning, disabling cloud-init after first boot on non-cloud hosts, manage_etc_hosts, and not clobbering the default user \u2014 none present.\nAuditor corrections: PROV-007: 'autoinstall is validated by cloud-init schema / subiquity dry-run' is imprecise. `cloud-init schema` validates only the cloud-init user-data; the Subiquity `autoinstall:` block has a separate schema that cloud-init schema historically does NOT check. The correct validator is subiquity's autoinstall-schema validation or an installer dry-run; relying on `cloud-init schema` alone gives false confidence.; PROV-003: deriving the parent disk via a single `lsblk -no PKNAME` hop is insufficient for stacked holders (LUKS-on-LVM-on-MD). The exclusion logic must walk holders recursively (lsblk -s, or /sys/block/<dev>/holders traversal) or it can fail to recognize that an in-use disk backs the running root.; PROV-002: 'zerombr'/'clearpart' are Kickstart directives that execute on the TARGET during the install, not host-side commands the generator runs, so 'trace control flow passes through confirm_destroy guard' is category-confused for them. The host-side destroy guard cannot gate in-target directives; those are governed by whoever launches the installer. The control should separate host-side destructive ops (wipefs/mkfs/luksFormat/dd run by the script) from generated in-target directives.; PROV-005: listing `firewall-cmd --permanent` as the example of idempotent/declarative conflates persistence with idempotency. `--permanent --add-port` persists but re-running is only idempotent because firewalld dedupes, not because the form is declarative; nftables rule appends and `ufw allow` need explicit grep-guard or `--add-port` is fine but the rationale's framing is loose.; Validation claim coverage: PROV-007 'applies_to' omits Arch entirely (pacstrap installer generates no schema-validated artifact), so the 'each family has a real validator' framing has a gap the rubric doesn't acknowledge \u2014 Arch correctness must be enforced by the generation/idempotency controls and a chroot smoke-test, not a validator.; The summary claims a 'family-agnostic dispatcher' and per-family generation-correctness controls, but the controls array (PROV-001..010) contains only cross-cutting invariants and the JSON is truncated mid-PROV-010 rationale \u2014 the per-family correctness controls, deterministic_transforms catalog, and any scoring/weighting are not actually present in the rubric as delivered.",
+  "references": [
+    "Red Hat Enterprise Linux - Performing an automated installation using Kickstart (and the Kickstart syntax reference / %pre, %packages, %post, partitioning, bootloader)",
+    "pykickstart / ksvalidator documentation",
+    "Ubuntu Subiquity autoinstall reference (autoinstall.html) and autoinstall schema (version 1)",
+    "cloud-init documentation: NoCloud datasource, user-data modules, and `cloud-init schema` / `cloud-init devel schema` validation",
+    "Debian Installer preseed documentation (appendix B, partman-auto / partman-crypto recipes, late_command)",
+    "Arch Linux Installation guide + dm-crypt/Encrypting an entire system + mkinitcpio + GRUB (cryptdevice) wiki pages",
+    "openSUSE/SUSE AutoYaST guide (profile structure, partitioning, scripts, schema/RNG validation)",
+    "curtin documentation (in-target, storage config, dm_crypt)",
+    "systemd-cryptsetup / crypttab(5) and cryptsetup LUKS2 manual",
+    "CIS Distribution-Independent Linux Benchmark (basis for the secure post-install hooks: firewall, sshd hardening, automatic updates)",
+    "OpenSSH sshd_config(5) (PasswordAuthentication, PermitRootLogin), fail2ban and unattended-upgrades / dnf-automatic documentation"
+  ],
+  "controls": [
+    {
+      "id": "PROV-001",
+      "title": "Mode is explicit and mutually exclusive: --interactive (TUI) vs --unattended/--assume-yes (no prompts), selectable by flag or env",
+      "severity": "critical",
+      "rationale": "The single most important property of a provisioning script: it must be deterministic about whether it will ever block on a human. A script that prompts in a CI/PXE/cloud context hangs the pipeline forever; a script that silently auto-confirms destructive ops in a human session destroys the wrong disk. Mode must be chosen up front from an explicit signal (flag or env), default to the safe mode for the detected context, and be impossible to leave ambiguous (e.g. --interactive together with --assume-yes is a hard error).",
+      "check": "Grep the script for a mode resolver. Confirm: (1) a flag like --interactive / --unattended (or MODE env) sets a single MODE variable; (2) the two modes are mutually exclusive and conflict errors out non-zero; (3) when no TTY is present ([ -t 0 ] false) and no --assume-yes is given, the script refuses to run rather than hanging or auto-proceeding; (4) every prompt site is gated on MODE. Run the script with stdin closed (`</dev/null`) and assert it does not block.",
+      "fix": "Add the FLAG_PLUMBING deterministic transform: parse --interactive | --unattended | --assume-yes | --yes | INSTALL_MODE env into one MODE var, error on conflict, auto-detect TTY, and route every confirm/select through MODE-aware helpers (tui_select vs config-driven value).",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-002",
+      "title": "DESTRUCTIVE confirmation guard before any disk wipe / partition / mkfs / luksFormat / pvcreate",
+      "severity": "critical",
+      "rationale": "Provisioning is destructive by definition. Every irreversible operation (wipefs, sgdisk --zap-all, parted mklabel, mkfs, cryptsetup luksFormat, pvcreate, dd, blkdiscard, kickstart `clearpart`/`zerombr`, autoinstall `storage` apply) must pass through a single guard that, in interactive mode, shows the EXACT target device, its current partition table and any mounted/holder usage, and requires the operator to type the device name or 'YES'; and in unattended mode requires --assume-yes to have been explicitly set. No code path may reach mkfs without crossing this guard.",
+      "check": "Enumerate every destructive command (wipefs|sgdisk|parted.*mk|mkfs|luksFormat|pvcreate|blkdiscard|dd of=|zerombr|clearpart). For each, trace that control flow passes through the confirm_destroy guard. Verify the guard prints the resolved /dev path, lsblk of that device, and refuses unless interactive-confirmed or --assume-yes. Verify it rejects an empty/whitespace device and a device that is the live root disk.",
+      "fix": "Inject the CONFIRM_DESTROY_GUARD transform and wrap each destructive call. In unattended mode it checks ASSUME_YES; in interactive mode it requires a typed match of the device basename via whiptail/read.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-003",
+      "title": "Live-system / target-disk safety interlock (never wipe the running root or a mounted/in-use disk)",
+      "severity": "critical",
+      "rationale": "A classic catastrophic bug is selecting the installer/live medium or the currently mounted root device as the install target. The script must resolve the disk backing `/`, the disk backing the running live/boot medium, and any disk with mounted partitions or active LVM/MD/crypt holders, and exclude them from selectable targets (or hard-refuse if explicitly named) unless an explicit override flag plus --assume-yes is given.",
+      "check": "Confirm the script derives the root-backing disk (findmnt -no SOURCE /, then to parent via lsblk -no PKNAME), the live medium, and holders, and removes them from the candidate disk list. Test by pointing TARGET_DISK at the root disk and asserting non-zero exit with a clear message absent an override.",
+      "fix": "Add a resolve_target_disks() that lists block devices via `lsblk -dnpo NAME,TYPE,SIZE,MODEL`, filters TYPE=disk, subtracts the root/live/holder disks, and feeds the result to the TUI picker or validates the unattended TARGET_DISK against the exclusion set.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-004",
+      "title": "Preflight checks: UEFI vs BIOS, arch, disk presence, free space, RAM, network reachability, root/privilege",
+      "severity": "critical",
+      "rationale": "Most failed installs fail late and dirty (after partitioning) for a condition knowable up front: wrong firmware mode for the chosen bootloader layout, wrong CPU arch for the chosen ISO/packages, no candidate disk, insufficient size for the requested layout, no network for a network install, or not running as root. A single preflight gate that fails CLOSED before any mutation turns a corrupted half-install into a clean refusal.",
+      "check": "Confirm a run_preflight() runs before any destructive step and validates: firmware mode (`[ -d /sys/firmware/efi ]`), arch (`uname -m` vs expected), at least one candidate disk, target disk size >= required layout sum, minimum RAM, network reachability when network install, and EUID 0. Confirm it aggregates failures and exits non-zero listing all of them. Confirm bootloader/partition generation reads the detected firmware mode (GPT+ESP for UEFI, BIOS-boot/MBR for legacy).",
+      "fix": "Inject the PREFLIGHT_BLOCK transform; have generation steps branch on FIRMWARE (uefi|bios) for the partition/bootloader scaffold.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-005",
+      "title": "Idempotency / safe re-runnability",
+      "severity": "high",
+      "rationale": "Provisioning scripts get re-run after partial failures, network drops, and edits. Non-destructive phases (config generation, package list assembly, key fetching, mount setup, post hooks) must be safe to re-run without duplicating fstab lines, re-appending sources, stacking firewall rules, or failing because a mountpoint/dir/file already exists. Destructive phases must be explicitly re-armed (the confirm/--assume-yes guard re-fires), never silently repeated.",
+      "check": "Run the non-destructive path twice and diff outputs/side effects: generated config identical, no duplicated fstab/sources/firewall entries, mkdir/mount/ln use idempotent forms (mkdir -p, mountpoint -q checks, grep-before-append). Confirm destructive steps are NOT auto-repeated on re-run.",
+      "fix": "Replace append-blind operations with grep-guarded appends, use `mkdir -p`, `mountpoint -q || mount`, `id -u user || useradd`, `firewall-cmd --permanent` (declarative), and write generated config to a temp file then atomically `mv` into place.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-006",
+      "title": "Dry-run / --check mode that produces and validates artifacts without touching disks",
+      "severity": "high",
+      "rationale": "Operators must be able to see exactly what WOULD happen \u2014 the resolved target disk, the partition plan, the full generated Kickstart/autoinstall/AutoYaST/cloud-init, and the validator verdict \u2014 without mutating anything. This is the primary review and CI gate before a real run.",
+      "check": "Confirm `--check`/`--dry-run` runs preflight, resolves the target, renders the full generated config to stdout or an out dir, runs the config validator (PROV-014), and exits 0/non-zero WITHOUT executing any destructive command. Verify with strace/grep that no wipefs/mkfs/parted runs under --dry-run.",
+      "fix": "Gate every destructive command behind a `run()` wrapper that, when DRY_RUN=1, prints the command instead of executing it; always run generation + validation regardless of DRY_RUN.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-007",
+      "title": "Generated config is validated against its schema before use (ksvalidator / cloud-init schema / autoinstall / AutoYaST)",
+      "severity": "critical",
+      "rationale": "Shipping an invalid Kickstart or autoinstall file means the failure surfaces mid-install on the target, often unrecoverably and without a console. Each family has a real validator: `ksvalidator` (pykickstart) for Kickstart, `cloud-init schema --config-file` for cloud-init/user-data, autoinstall is validated by `cloud-init schema` / subiquity dry-run, AutoYaST against its RNG/DTD via `xmllint --relaxng`/`jing`, preseed via `debconf-set-selections --checkonly`. The generator must call the right one and fail closed on error.",
+      "check": "Confirm that after generating config the script invokes the family-appropriate validator and aborts non-zero on failure. Feed a deliberately malformed config and assert the run is refused before any disk op.",
+      "fix": "Inject the VALIDATE_CONFIG transform: a dispatcher that maps family -> validator command and runs it on the generated artifact in both dry-run and real runs.",
+      "applies_to": "rhel-family,debian-family,suse,cloud-init",
+      "automatable": true
+    },
+    {
+      "id": "PROV-008",
+      "title": "Checksum + signature verification of ISOs and downloaded packages/keys",
+      "severity": "critical",
+      "rationale": "A provisioning script that fetches an installer ISO, a netboot image, an SSH key, or a package over the network and uses it without verifying integrity/authenticity is a supply-chain hole \u2014 exactly the threat model where a tampered image silently backdoors every host you build. Verify SHA256 against a pinned, separately-obtained value and, where available, GPG-verify the checksum file (e.g. CHECKSUM signed by the distro key) before consuming any artifact.",
+      "check": "Confirm every download is followed by `sha256sum -c` against a pinned digest (not the digest shipped alongside the file by the same untrusted source) and, where a signed checksum file exists, `gpg --verify`. Verify the script refuses to proceed on mismatch. Confirm keys/repos are pinned, not fetched over plain HTTP.",
+      "fix": "Add a verify_artifact() that takes URL + expected SHA256 (+ optional signing key), downloads to temp, runs sha256sum -c and gpg --verify, and only then returns the path; route all fetches through it.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-009",
+      "title": "No plaintext passwords in config; encrypted/hashed credentials and root SSH password-login disabled",
+      "severity": "critical",
+      "rationale": "Generated Kickstart/preseed/autoinstall/AutoYaST/cloud-init files are frequently committed, logged, or served over PXE in cleartext. Passwords must be stored hashed (`rootpw --iscrypted`, autoinstall `password:` as a crypt hash, cloud-init `passwd` hashed with `lock_passwd`/`ssh_pwauth: false`), never echoed to logs, and the secure default must be key-based SSH only. Any plaintext-password directive is a finding.",
+      "check": "Grep generated artifacts for plaintext password directives (rootpw without --iscrypted, `plain_text_passwd`, `ssh_pwauth: true`, autoinstall identity password that isn't a hash). Confirm hashes are produced via `openssl passwd -6` / `mkpasswd -m sha-512`. Confirm logs/`set -x` output never contain the secret. Confirm sshd hook sets PasswordAuthentication no and PermitRootLogin prohibit-password/no.",
+      "fix": "Hash all passwords before injection; set ssh_pwauth false / PasswordAuthentication no in the secure post hook; scrub secrets from logging by disabling xtrace around secret handling; require SSH public keys for the admin user.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-010",
+      "title": "Secure post-install hooks: firewall on, SSH keys (not passwords), updates applied, fail2ban + unattended-upgrades/dnf-automatic",
+      "severity": "high",
+      "rationale": "A freshly provisioned host is at its most exposed. The post phase (Kickstart %post, preseed late_command, autoinstall late-commands, AutoYaST chroot scripts, cloud-init runcmd/bootcmd, Arch arch-chroot tail) must leave the box hardened by default: a default-deny firewall (firewalld/nftables/ufw) with only required ports, SSH with key-only auth and root password login disabled, security updates applied, fail2ban (or sshd-level rate limiting) for SSH, and automatic security updates (unattended-upgrades on Debian/Ubuntu, dnf-automatic on RHEL family). These run inside the installed system's chroot, not the live env.",
+      "check": "Confirm the post hook (per family) enables+configures the firewall default-deny with an explicit allow set, hardens sshd, runs the update command, installs/enables fail2ban, and enables automatic security updates. Confirm hooks run in --chroot/target context. Confirm hooks are idempotent (PROV-005) and their failures are logged with non-zero propagation where appropriate.",
+      "fix": "Inject the SECURE_POST_HOOK transform per family (a %post block for ks, a late-commands list for autoinstall with `curtin in-target`, runcmd for cloud-init, an arch-chroot heredoc for Arch).",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-011",
+      "title": "Logging: timestamped, leveled, to a file AND console, with secret redaction",
+      "severity": "high",
+      "rationale": "Unattended installs fail invisibly without durable logs. The script must log every phase with timestamps and levels to a persistent path (and tee to console in interactive mode), capture the resolved plan and validator output, and redact secrets. On the installed system the post hook should drop a provenance log (what built this host, when, with which config hash).",
+      "check": "Confirm a log() helper writes ISO-8601 timestamp + level + message to a logfile under e.g. /var/log/provision-*.log and to stderr; confirm phase boundaries and exit status are logged; confirm secrets are not logged; confirm a build-provenance marker is written into the target.",
+      "fix": "Add the LOGGING transform: log()/die() helpers, `exec` redirection to a tee'd logfile, set a trap that logs the failing line/exit code.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-012",
+      "title": "Strict shell hygiene + meaningful exit codes + error trap",
+      "severity": "high",
+      "rationale": "Provisioning scripts that swallow errors corrupt machines silently. The driver must use `set -Eeuo pipefail`, an ERR trap that reports the failing command and line, and distinct documented exit codes (e.g. 0 ok, 2 usage, 3 preflight failed, 4 user-aborted, 5 validation failed, 6 destructive-guard refused, 10 install failed) so callers/orchestrators can react programmatically.",
+      "check": "Confirm `set -Eeuo pipefail` and a `trap ... ERR`/`EXIT`. Confirm exit codes are an enumerated, documented set rather than bare `exit 1`. Confirm `pipefail`-sensitive pipelines aren't masking failures. Confirm cleanup (unmount, close LUKS, remove temp) runs on EXIT.",
+      "fix": "Add strict mode + trap + a documented exit-code table + a cleanup() bound to EXIT that unmounts in reverse order and closes crypt devices.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-013",
+      "title": "Network bring-up with bounded retry, backoff, and timeout",
+      "severity": "high",
+      "rationale": "Network installs and package fetches fail transiently. Any network-dependent step (repo sync, package download, key fetch, ISO pull, DHCP) must retry a bounded number of times with backoff and an overall timeout, then fail closed \u2014 never loop forever (which hangs unattended installs) and never proceed as if it succeeded.",
+      "check": "Confirm downloads/repo ops are wrapped in a retry helper with max attempts, sleep/backoff, and `curl --fail --connect-timeout`/`wget --timeout`. Confirm DHCP/connectivity wait has a deadline. Confirm exhaustion yields non-zero, not silent continuation.",
+      "fix": "Add a retry() wrapper (n attempts, exponential backoff, per-attempt timeout) and route all network ops through it; use it for a connectivity-wait loop with a hard deadline.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-014",
+      "title": "Reproducible / declarative config: single source of truth, pinned versions, deterministic output",
+      "severity": "high",
+      "rationale": "Production provisioning must be reproducible: the same inputs produce byte-identical generated config and the same installed result. Inputs (hostname, disk, user, timezone, profile, package set, repo URLs/releasever) come from one declarative source (a config file / env / answer file), package and repo versions are pinned, and generation is deterministic (sorted package lists, stable ordering, no embedded timestamps/UUIDs unless seeded). This enables diff-review, GitOps, and trustworthy rebuilds.",
+      "check": "Confirm all variable inputs come from a single config/answer file or explicit flags (no scattered hardcoding). Generate twice and assert byte-identical output (sort package lists, no `date`/random UUID in the artifact). Confirm repos/releasever/package versions are pinned. Confirm a config hash is recorded.",
+      "fix": "Centralize inputs into a sourced config file with documented defaults; pipe package lists through `sort -u`; seed or omit nondeterministic fields; emit and log a sha256 of the generated config.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-015",
+      "title": "Input validation for every operator-supplied value (hostname, disk, username, timezone, IP, partition sizes)",
+      "severity": "high",
+      "rationale": "Both TUI and unattended inputs must be validated before they reach disk or config: hostnames against RFC-1123, usernames against the useradd NAME_REGEX, timezones against the tz database, disk paths against actual block devices, IP/CIDR against parseable forms, sizes against available space. Invalid input must be rejected (re-prompt in interactive, non-zero abort in unattended) rather than producing a broken install.",
+      "check": "Confirm each input has a validator (regex/whitelist/existence check) applied in BOTH modes. Test boundary/garbage inputs: bad hostname, nonexistent disk, unknown timezone, oversized partition. Interactive re-prompts; unattended exits non-zero with a clear message.",
+      "fix": "Add validate_* helpers (hostname, username, timezone via `[ -f /usr/share/zoneinfo/$TZ ]`, disk via lsblk, ip via a CIDR regex/`ipcalc`) and call them at the TUI prompt loop and at config-load time.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-016",
+      "title": "LUKS full-disk encryption option with safe passphrase/key handling",
+      "severity": "high",
+      "rationale": "Production hosts (especially laptops/edge) frequently require encryption at rest. The script must offer optional LUKS2 FDE: in interactive mode prompt for a passphrase (twice, never echoed, with strength minimum); in unattended mode read the passphrase/keyfile from a secure source (env/keyfile/TPM enroll) NEVER hardcoded in the answer file; wire crypttab/initramfs correctly so the system boots; and support the family-native mechanism (Kickstart `--encrypted --luks-version=luks2 --passphrase=`/`autopart --encrypted`, autoinstall storage with `dm_crypt`, AutoYaST encryption, Arch explicit cryptsetup luksFormat + crypttab/mkinitcpio).",
+      "check": "Confirm LUKS is gated behind an --encrypt flag/config key. Confirm luksFormat uses luks2 and a passphrase sourced from prompt/env/keyfile, never a literal in the committed config. Confirm crypttab + initramfs/dracut are configured so the target boots. Confirm passphrase is never logged. Confirm interactive double-entry + strength check.",
+      "fix": "Inject the LUKS_PARTITION_FLOW transform (Arch path: sgdisk -> cryptsetup luksFormat luks2 from a fd, open, pvcreate on the mapper, LVM, mkfs, crypttab, dracut/mkinitcpio). For ks/autoinstall/AutoYaST, set the native encrypted directives with the passphrase supplied at apply-time, not embedded.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-017",
+      "title": "Kickstart correctness: %pre/%packages/%post, partitioning (LVM/LUKS), network, bootloader, %post --log",
+      "severity": "high",
+      "rationale": "For RHEL/Fedora/Rocky/Alma the generated Kickstart must be structurally complete and current: a valid `%pre`/`%pre-install` for dynamic disk discovery, an explicit `%packages` group set with `@^...` environment, partitioning via `clearpart`+`part`/`autopart` with LVM and optional `--encrypted` LUKS, `network` config, `bootloader --location` matching firmware mode, `rootpw --iscrypted`, `firstboot --disable`, `selinux --enforcing`, and a `%post --log=` that runs the secure hooks. `reboot`/`poweroff` and `text`/`cmdline` for unattended. It must pass `ksvalidator`.",
+      "check": "Run `ksvalidator` against the generated file. Confirm presence and correctness of %pre (if used), %packages with an environment group, partition stanzas with LVM (and --encrypted when LUKS chosen), network, firmware-appropriate bootloader, --iscrypted rootpw, selinux enforcing, and %post --log running the hardening hook. Confirm `cmdline`/`text` and reboot for unattended.",
+      "fix": "Inject the KICKSTART_SCAFFOLD transform: a heredoc template with placeholders filled from the declarative config, branching on FIRMWARE and ENCRYPT, ending with a %post --log block that calls the secure hook; then run ksvalidator.",
+      "applies_to": "rhel-family",
+      "automatable": true
+    },
+    {
+      "id": "PROV-018",
+      "title": "Ubuntu Subiquity autoinstall correctness: cloud-init user-data wrapper, autoinstall YAML, storage (direct/lvm/zfs), late-commands",
+      "severity": "high",
+      "rationale": "Modern Ubuntu (>=20.04) uses Subiquity autoinstall delivered as cloud-init user-data (`#cloud-config` with a top-level `autoinstall:` key, version 1). The generated file must include identity (hostname + hashed password), ssh (install-server true, authorized-keys, allow-pw false), a `storage` section (layout direct/lvm/zfs OR an explicit curtin storage config with dm_crypt for LUKS), `packages`, `late-commands` running hardening via `curtin in-target -- ...`, and a leading `#cloud-config` line. It must pass `cloud-init schema --config-file`. The interactive-disable (`autoinstall` present) prevents installer prompts.",
+      "check": "Confirm the file begins with `#cloud-config` and has `autoinstall: { version: 1, ... }`. Confirm identity password is a hash, ssh allow-pw false + authorized-keys present, a valid storage layout (direct|lvm|zfs) or explicit dm_crypt config for LUKS, packages list, and late-commands using `curtin in-target`. Validate with `cloud-init schema`. Confirm no interactive installer prompt remains.",
+      "fix": "Inject the AUTOINSTALL_SCAFFOLD transform: a `#cloud-config`/`autoinstall:` YAML template parameterized from config (storage layout switch, hashed pw, keys, late-commands hardening), then validate via `cloud-init schema --config-file`.",
+      "applies_to": "debian-family",
+      "automatable": true
+    },
+    {
+      "id": "PROV-019",
+      "title": "Debian classic preseed correctness (legacy/d-i path)",
+      "severity": "medium",
+      "rationale": "For Debian and pre-Subiquity Ubuntu (or where d-i is required), the preseed must set `d-i` debconf values correctly: locale/keyboard, network, mirror, `partman-auto`/`partman-auto-lvm`/`partman-crypto` recipe for LVM+LUKS, user creation with a hashed password (`passwd/root-password-crypted`, `passwd/user-password-crypted`), `pkgsel` package set, `grub-installer` for the right firmware, and a `preseed/late_command` running hardening via `in-target`. Validate with `debconf-set-selections -c`.",
+      "check": "Confirm preseed sets locale/keyboard/network/mirror, a partman recipe (LVM, crypto when LUKS), crypted (not plaintext) passwords, pkgsel selection, grub install matching firmware, and a late_command with `in-target`. Run `debconf-set-selections --checkonly` (`-c`) on the file. Confirm `auto=true priority=critical` style non-interactive selection.",
+      "fix": "Inject the PRESEED_SCAFFOLD transform: a parameterized preseed with partman-auto/-lvm/-crypto recipe, crypted passwords, and an in-target late_command; gate it behind a `--legacy-preseed` family selector and run the checkonly validator.",
+      "applies_to": "debian-family",
+      "automatable": true
+    },
+    {
+      "id": "PROV-020",
+      "title": "Arch scripted installer correctness: pacstrap / genfstab / arch-chroot with verified mirrors and ordered teardown",
+      "severity": "medium",
+      "rationale": "Arch has no answer-file installer, so the script IS the installer. It must: partition per firmware (GPT+ESP for UEFI), optionally LUKS+LVM, mkfs, mount in the right order under /mnt, `pacstrap` a pinned base set, `genfstab -U /mnt >> /mnt/etc/fstab`, then `arch-chroot /mnt` to set timezone/locale/hostname/initramfs (`mkinitcpio` with the right HOOKS incl. `encrypt`/`lvm2` when LUKS+LVM), install+configure the bootloader (systemd-boot or GRUB with the cryptdevice cmdline), create the user with hashed password + sudo, drop SSH keys, and run the secure hook \u2014 all idempotent and with reverse-order unmount/crypt-close on exit. Mirrorlist and keyring must be verified/refreshed.",
+      "check": "Confirm partition->luks->lvm->mkfs->mount(/mnt then /mnt/boot)->pacstrap->genfstab->arch-chroot ordering. Confirm mkinitcpio HOOKS include encrypt/lvm2 when applicable and bootloader has the correct cryptdevice/root cmdline. Confirm user pw is hashed, SSH key-only. Confirm `pacman-key --refresh`/verified mirrorlist. Confirm cleanup unmounts in reverse and closes crypt.",
+      "fix": "Inject the ARCH_INSTALLER_SCAFFOLD transform: the full ordered pacstrap/genfstab/arch-chroot heredoc with FIRMWARE/ENCRYPT branches, mkinitcpio HOOKS edit, bootloader cmdline, and an EXIT trap doing `umount -R /mnt` + `cryptsetup close`.",
+      "applies_to": "arch",
+      "automatable": true
+    },
+    {
+      "id": "PROV-021",
+      "title": "SUSE AutoYaST correctness: well-formed, schema-valid XML with partitioning, software, users, and post scripts",
+      "severity": "medium",
+      "rationale": "openSUSE/SLES use AutoYaST XML. The generated profile must be well-formed XML in the correct namespace, with `partitioning` (LVM + optional encryption), `software` patterns/packages, `networking`, `users` with hashed passwords, `bootloader`, `security`, and `scripts` (chroot/post) running the hardening hooks. It must validate against the AutoYaST schema (RNG via `jing`/`xmllint --relaxng`) and `xmllint --noout` for well-formedness.",
+      "check": "Run `xmllint --noout` for well-formedness and RNG validation against the AutoYaST schema. Confirm partitioning (LVM/encryption), software patterns, hashed user passwords, bootloader, security, and a post `<scripts>` chroot script calling the hardening hook. Confirm `confirm` is false for unattended.",
+      "fix": "Inject the AUTOYAST_SCAFFOLD transform: a parameterized XML template with the required sections and a chroot post-script, then validate with xmllint/jing.",
+      "applies_to": "suse",
+      "automatable": true
+    },
+    {
+      "id": "PROV-022",
+      "title": "Generic cloud-init correctness: meta-data/user-data/network-config, schema-valid, key-only, hardening via runcmd",
+      "severity": "medium",
+      "rationale": "For cloud/VM images the generic path is cloud-init (NoCloud seed or datasource): a `#cloud-config` user-data with `hostname`, `users` (sudo, ssh-authorized-keys, `lock_passwd: true`), `ssh_pwauth: false`, `package_update`/`package_upgrade`, `packages`, and `runcmd`/`bootcmd` for hardening; plus `meta-data` (instance-id) and optional `network-config` v2. Must pass `cloud-init schema --config-file` and, for NoCloud, be packaged into a properly labeled `cidata` seed ISO.",
+      "check": "Confirm user-data starts with `#cloud-config`, defines users with ssh keys + lock_passwd, ssh_pwauth false, package upgrade, and hardening runcmd. Confirm meta-data has a stable instance-id. Validate with `cloud-init schema`. For NoCloud confirm the seed ISO is labeled `cidata` with user-data+meta-data.",
+      "fix": "Inject the CLOUDINIT_SCAFFOLD transform (user-data + meta-data + optional network-config), validate via cloud-init schema, and build the cidata seed with `genisoimage -volid cidata -joliet -rock`.",
+      "applies_to": "cloud-init",
+      "automatable": true
+    },
+    {
+      "id": "PROV-023",
+      "title": "Interactive TUI (whiptail/dialog) for disk, hostname, user, timezone, profile with validation and a final confirm-before-destroy review",
+      "severity": "high",
+      "rationale": "The interactive path must be a real, usable TUI: a menu to pick the target disk (populated from the live block-device list with sizes/models), inputs for hostname/username/timezone/profile/encryption, each field validated and re-prompted on bad input, and a final summary screen that shows the full plan (disk, layout, encryption, packages) and requires an explicit destructive confirmation before anything is written. Cancel at any step exits cleanly (code 4) with no changes.",
+      "check": "Confirm whiptail/dialog menus exist for disk (from lsblk), hostname, user, timezone, profile, and encrypt toggle; each value passes its validator (PROV-015) and re-prompts on failure; a final --yesno review shows the plan and gates the destructive guard (PROV-002); cancel/ESC exits 4 cleanly. Confirm graceful fallback if whiptail absent (dialog, or refuse with a clear message).",
+      "fix": "Inject the WHIPTAIL_MENU_SKELETON transform: a tui_menu/tui_input/tui_confirm helper set built on whiptail with `--menu`/`--inputbox`/`--yesno`, a disk picker fed by `lsblk -dnpo NAME,SIZE,MODEL`, per-field validation loops, and a final review screen wired to confirm_destroy.",
+      "applies_to": "all-families",
+      "automatable": true
+    },
+    {
+      "id": "PROV-024",
+      "title": "Single family dispatcher + clean separation of generate vs apply, with usage/help and self-test",
+      "severity": "medium",
+      "rationale": "A production tool that targets all families needs one clear entry point that detects/selects the family (flag/config/auto-detect via /etc/os-release in re-provision contexts), separates config GENERATION (pure, validateable, dry-runnable) from APPLY (destructive), and ships `--help` documenting flags, env, exit codes, and modes. This keeps the generators independently testable and the destructive path minimal and auditable.",
+      "check": "Confirm a dispatcher maps `--family rhel|debian|ubuntu|arch|suse|cloud-init` (or auto-detect) to the right generator, that generate and apply are separable (generate works without root/disks), and that `--help`/usage documents every flag, env var, mode, and exit code. Confirm a `--self-test`/lint target that runs shellcheck + all validators on sample configs.",
+      "fix": "Add a case-based family dispatcher, split generate_<family>() from apply_<family>(), write a usage() with the full flag/env/exit-code reference, and add a self-test target invoking shellcheck and each schema validator on fixtures.",
+      "applies_to": "all-families",
+      "automatable": true
+    }
+  ],
+  "deterministic_transforms": [
+    {
+      "id": "FLAG_PLUMBING",
+      "description": "Resolve mode and the --assume-yes/--interactive/--dry-run/--family flags into single variables, with mutual-exclusion errors, TTY auto-detect, and a documented exit-code table. Satisfies PROV-001, PROV-006, PROV-012, PROV-024.",
+      "trigger": "Script has no explicit MODE resolver, prompts unconditionally, or uses bare `exit 1`.",
+      "implementation": "set -Eeuo pipefail\n# Exit codes: 0 ok | 2 usage | 3 preflight | 4 user-abort | 5 validation | 6 destroy-guard | 10 install-fail\nMODE=\"\" ; ASSUME_YES=0 ; DRY_RUN=0 ; FAMILY=\"${FAMILY:-auto}\" ; CONFIG=\"\"\nERR_USAGE=2; ERR_PREFLIGHT=3; ERR_ABORT=4; ERR_VALIDATE=5; ERR_DESTROY=6; ERR_INSTALL=10\nusage(){ cat <<EOF\nUsage: $0 [--interactive|--unattended] [--assume-yes] [--dry-run] --family <rhel|debian|ubuntu|arch|suse|cloud-init|auto> [--config FILE]\nEnv: INSTALL_MODE=interactive|unattended  ASSUME_YES=1  DRY_RUN=1  FAMILY=...\nExit: 0 ok 2 usage 3 preflight 4 abort 5 validation 6 destroy-guard 10 install-fail\nEOF\n}\nwhile [ $# -gt 0 ]; do case \"$1\" in\n  --interactive) MODE=interactive;; --unattended) MODE=unattended;;\n  --assume-yes|--yes|-y) ASSUME_YES=1;; --dry-run|--check) DRY_RUN=1;;\n  --family) FAMILY=\"$2\"; shift;; --config) CONFIG=\"$2\"; shift;;\n  -h|--help) usage; exit 0;; *) echo \"unknown arg: $1\" >&2; usage; exit \"$ERR_USAGE\";;\nesac; shift; done\n[ -z \"$MODE\" ] && MODE=\"${INSTALL_MODE:-}\"\n# auto-detect mode from TTY when unset\nif [ -z \"$MODE\" ]; then if [ -t 0 ] && [ -t 1 ]; then MODE=interactive; else MODE=unattended; fi; fi\n# conflict + safety guards\nif [ \"$MODE\" = interactive ] && [ \"$ASSUME_YES\" = 1 ]; then echo \"--interactive conflicts with --assume-yes\" >&2; exit \"$ERR_USAGE\"; fi\nif [ \"$MODE\" = unattended ] && [ \"$ASSUME_YES\" != 1 ] && [ \"$DRY_RUN\" != 1 ]; then echo \"unattended mode requires --assume-yes (or --dry-run)\" >&2; exit \"$ERR_USAGE\"; fi",
+      "placement": "Top of the driver script, immediately after the shebang and strict-mode line; before any other logic."
+    },
+    {
+      "id": "LOGGING",
+      "description": "Timestamped/leveled log helpers teed to a persistent file, a die() that exits with a code, and an ERR/EXIT trap that reports the failing line and runs ordered cleanup (reverse unmount + crypt close). Satisfies PROV-011, PROV-012.",
+      "trigger": "Script uses bare echo for status, has no logfile, or no error trap / cleanup.",
+      "implementation": "LOGFILE=\"${LOGFILE:-/var/log/provision-$(date +%Y%m%dT%H%M%S).log}\"\n_ts(){ date -u +%Y-%m-%dT%H:%M:%SZ; }\nlog(){ printf '%s [%s] %s\\n' \"$(_ts)\" \"${2:-INFO}\" \"$1\" | tee -a \"$LOGFILE\" >&2; }\ndie(){ log \"$1\" ERROR; exit \"${2:-1}\"; }\nMOUNTS=() ; CRYPTS=()\ncleanup(){ local rc=$?; set +e\n  for m in $(printf '%s\\n' \"${MOUNTS[@]:-}\" | tac); do [ -n \"$m\" ] && umount -R \"$m\" 2>/dev/null; done\n  for c in \"${CRYPTS[@]:-}\"; do [ -n \"$c\" ] && cryptsetup close \"$c\" 2>/dev/null; done\n  log \"exit rc=$rc\" \"$([ $rc -eq 0 ] && echo INFO || echo ERROR)\"; }\ntrap 'log \"failed at line $LINENO: $BASH_COMMAND\" ERROR' ERR\ntrap cleanup EXIT\nrun(){ if [ \"${DRY_RUN:-0}\" = 1 ]; then log \"DRY-RUN: $*\" DEBUG; else log \"+ $*\" DEBUG; \"$@\"; fi; }",
+      "placement": "After FLAG_PLUMBING; the `run()` wrapper must then be used for every mutating command so --dry-run is honored everywhere."
+    },
+    {
+      "id": "PREFLIGHT_BLOCK",
+      "description": "Aggregate preflight gate: root, firmware (UEFI/BIOS), arch, candidate disk presence, RAM, network reachability, target free space. Collects all failures and exits ERR_PREFLIGHT. Exports FIRMWARE. Satisfies PROV-004.",
+      "trigger": "Script reaches partitioning without verifying firmware/arch/disk/space/network/root.",
+      "implementation": "run_preflight(){ local fail=0; local need_net=\"${1:-1}\" min_ram_mb=\"${2:-1024}\" req_bytes=\"${3:-0}\" tgt=\"${4:-}\"\n  [ \"$(id -u)\" -eq 0 ] || { log \"must run as root\" ERROR; fail=1; }\n  if [ -d /sys/firmware/efi ]; then FIRMWARE=uefi; else FIRMWARE=bios; fi; export FIRMWARE; log \"firmware=$FIRMWARE\"\n  case \"$(uname -m)\" in x86_64|aarch64|arm64) :;; *) log \"unsupported arch $(uname -m)\" ERROR; fail=1;; esac\n  lsblk -dnpo NAME,TYPE | awk '$2==\"disk\"{n++} END{exit !(n>0)}' || { log \"no candidate disk\" ERROR; fail=1; }\n  local ram; ram=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo); [ \"$ram\" -ge \"$min_ram_mb\" ] || { log \"RAM ${ram}MB < ${min_ram_mb}MB\" ERROR; fail=1; }\n  if [ \"$need_net\" = 1 ]; then retry 3 ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 || { log \"no network\" ERROR; fail=1; }; fi\n  if [ -n \"$tgt\" ] && [ \"$req_bytes\" -gt 0 ]; then local sz; sz=$(blockdev --getsize64 \"$tgt\" 2>/dev/null || echo 0); [ \"$sz\" -ge \"$req_bytes\" ] || { log \"target $tgt $sz < required $req_bytes\" ERROR; fail=1; }; fi\n  [ \"$fail\" -eq 0 ] || exit \"$ERR_PREFLIGHT\"; log \"preflight ok\"; }",
+      "placement": "Called once after config load and before any destructive step; partition/bootloader generators must branch on $FIRMWARE (GPT+ESP for uefi, BIOS-boot/MBR for bios)."
+    },
+    {
+      "id": "RETRY",
+      "description": "Bounded retry with exponential backoff and per-attempt timeout for network operations; fails closed after N attempts. Satisfies PROV-013.",
+      "trigger": "Script does network ops (curl/wget/pacstrap/dnf/apt/ping) without retry/timeout, or loops forever waiting for network.",
+      "implementation": "retry(){ local max=\"$1\"; shift; local n=1 delay=2\n  until \"$@\"; do if [ \"$n\" -ge \"$max\" ]; then log \"giving up after $n attempts: $*\" ERROR; return 1; fi\n    log \"attempt $n/$max failed, retrying in ${delay}s: $*\" WARN; sleep \"$delay\"; n=$((n+1)); delay=$((delay*2)); done; }\nwait_network(){ local deadline=$(( $(date +%s) + ${1:-120} ))\n  until ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; do [ \"$(date +%s)\" -lt \"$deadline\" ] || die \"network not up within ${1:-120}s\" \"$ERR_PREFLIGHT\"; sleep 3; done; }\nfetch(){ retry 5 curl -fSL --connect-timeout 10 --max-time 120 -o \"$2\" \"$1\"; }",
+      "placement": "Defined before PREFLIGHT_BLOCK (preflight uses retry); all curl/wget/package-manager network calls routed through retry/fetch."
+    },
+    {
+      "id": "VERIFY_ARTIFACT",
+      "description": "Download-then-verify helper: SHA256 against a pinned digest and optional GPG signature verification before any artifact (ISO/key/package/checksum file) is consumed. Satisfies PROV-008.",
+      "trigger": "Script fetches an ISO, key, or package and uses it without sha256sum -c / gpg --verify against a pinned value.",
+      "implementation": "verify_artifact(){ # $1=url $2=expected_sha256 $3=out [$4=sig_url $5=gpg_keyring]\n  local url=\"$1\" want=\"$2\" out=\"$3\" sig=\"${4:-}\" kr=\"${5:-}\"\n  fetch \"$url\" \"$out\" || die \"download failed: $url\" \"$ERR_INSTALL\"\n  echo \"${want}  ${out}\" | sha256sum -c - >/dev/null 2>&1 || die \"sha256 mismatch for $out\" \"$ERR_VALIDATE\"\n  if [ -n \"$sig\" ]; then fetch \"$sig\" \"${out}.sig\"\n    gpgv ${kr:+--keyring \"$kr\"} \"${out}.sig\" \"$out\" >/dev/null 2>&1 || die \"gpg verify failed for $out\" \"$ERR_VALIDATE\"; fi\n  log \"verified $out\"; printf '%s' \"$out\"; }",
+      "placement": "After RETRY; every ISO/key/package fetch goes through verify_artifact with a digest pinned in the declarative config, never the digest served beside the file by the same source."
+    },
+    {
+      "id": "RESOLVE_TARGET_DISK",
+      "description": "Enumerate candidate disks, subtract the running-root disk, live medium, and any disk with mounted partitions / LVM-MD-crypt holders; expose a safe candidate list for the picker and validate an unattended TARGET_DISK against the exclusion set. Satisfies PROV-003.",
+      "trigger": "Script wipes a disk chosen by index/name without excluding the live/root/in-use disk.",
+      "implementation": "root_disk(){ local src pk; src=$(findmnt -no SOURCE / 2>/dev/null); pk=$(lsblk -no PKNAME \"$src\" 2>/dev/null | head -1); [ -n \"$pk\" ] && echo \"/dev/$pk\"; }\ncandidate_disks(){ local rd; rd=$(root_disk)\n  lsblk -dnpo NAME,TYPE | awk '$2==\"disk\"{print $1}' | while read -r d; do\n    [ \"$d\" = \"$rd\" ] && continue\n    # skip disks with any mounted child or active holder\n    if lsblk -nro MOUNTPOINT \"$d\" | grep -q . ; then continue; fi\n    echo \"$d\"; done; }\nvalidate_target(){ local t=\"$1\"; [ -b \"$t\" ] || die \"not a block device: $t\" \"$ERR_VALIDATE\"\n  [ \"$t\" = \"$(root_disk)\" ] && [ \"${ALLOW_ROOT_DISK:-0}\" != 1 ] && die \"refusing to target root disk $t\" \"$ERR_DESTROY\"\n  candidate_disks | grep -qx \"$t\" || die \"$t is in-use/excluded; not a safe target\" \"$ERR_DESTROY\"; }",
+      "placement": "Used by the WHIPTAIL disk picker (interactive) and by config load (unattended) before CONFIRM_DESTROY_GUARD."
+    },
+    {
+      "id": "CONFIRM_DESTROY_GUARD",
+      "description": "Single mandatory gate in front of every destructive disk op: prints the resolved device, its current layout and holders, then requires a typed device-name match (interactive) or ASSUME_YES (unattended). Satisfies PROV-002, PROV-001.",
+      "trigger": "Any wipefs/sgdisk/parted/mkfs/luksFormat/pvcreate is reachable without an explicit confirmation gate.",
+      "implementation": "confirm_destroy(){ local dev=\"$1\"; [ -n \"$dev\" ] || die \"confirm_destroy: empty device\" \"$ERR_DESTROY\"\n  validate_target \"$dev\"\n  log \"ABOUT TO DESTROY ALL DATA ON $dev\" WARN; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT \"$dev\" >&2 || true\n  if [ \"${DRY_RUN:-0}\" = 1 ]; then log \"DRY-RUN: would destroy $dev\"; return 0; fi\n  if [ \"$MODE\" = unattended ]; then [ \"${ASSUME_YES:-0}\" = 1 ] || die \"refusing destructive op without --assume-yes\" \"$ERR_DESTROY\"; log \"unattended: --assume-yes -> proceeding on $dev\" WARN; return 0; fi\n  local base; base=$(basename \"$dev\")\n  if command -v whiptail >/dev/null; then whiptail --title 'DESTRUCTIVE' --yesno \"ERASE EVERYTHING on $dev?\\n\\n$(lsblk -no NAME,SIZE,FSTYPE \"$dev\")\" 18 70 || exit \"$ERR_ABORT\"; fi\n  printf 'Type the device name (%s) to confirm: ' \"$base\" >&2; read -r ans\n  [ \"$ans\" = \"$base\" ] || die \"confirmation mismatch; aborting\" \"$ERR_ABORT\"; }",
+      "placement": "Called immediately before the first destructive command for the chosen disk; all subsequent wipe/partition/mkfs run through `run()` so dry-run still no-ops them."
+    },
+    {
+      "id": "WHIPTAIL_MENU_SKELETON",
+      "description": "Reusable whiptail TUI helpers (menu/input/password/yesno) with a disk picker fed from candidate_disks, per-field validation loops, and a final plan-review screen that triggers confirm_destroy. dialog fallback. Satisfies PROV-023, PROV-015.",
+      "trigger": "Interactive mode lacks a real TUI or prompts are ad-hoc reads without validation/review.",
+      "implementation": "TUI=${TUI:-whiptail}; command -v whiptail >/dev/null || TUI=dialog; command -v \"$TUI\" >/dev/null || die \"no whiptail/dialog for interactive mode\" \"$ERR_USAGE\"\ntui_input(){ local t=\"$1\" p=\"$2\" def=\"$3\" v; v=$($TUI --title \"$t\" --inputbox \"$p\" 10 70 \"$def\" 3>&1 1>&2 2>&3) || exit \"$ERR_ABORT\"; printf '%s' \"$v\"; }\ntui_pass(){ local t=\"$1\" v; v=$($TUI --title \"$t\" --passwordbox \"$2\" 10 70 3>&1 1>&2 2>&3) || exit \"$ERR_ABORT\"; printf '%s' \"$v\"; }\ntui_yesno(){ $TUI --title \"$1\" --yesno \"$2\" 18 72; }\npick_disk(){ local opts=(); while read -r d; do opts+=(\"$d\" \"$(lsblk -dno SIZE,MODEL \"$d\")\"); done < <(candidate_disks)\n  [ \"${#opts[@]}\" -gt 0 ] || die \"no selectable disks\" \"$ERR_PREFLIGHT\"\n  $TUI --title 'Target disk' --menu 'Choose install disk (DESTROYED):' 20 76 8 \"${opts[@]}\" 3>&1 1>&2 2>&3 || exit \"$ERR_ABORT\"; }\nprompt_until_valid(){ local title=\"$1\" prompt=\"$2\" def=\"$3\" validator=\"$4\" v\n  while :; do v=$(tui_input \"$title\" \"$prompt\" \"$def\"); if \"$validator\" \"$v\"; then printf '%s' \"$v\"; return; fi; $TUI --msgbox \"Invalid: $v\" 8 50; done; }\nreview_and_confirm(){ tui_yesno 'Confirm plan' \"$1\" || exit \"$ERR_ABORT\"; confirm_destroy \"$TARGET_DISK\"; }",
+      "placement": "Loaded when MODE=interactive; the wizard collects TARGET_DISK=$(pick_disk), HOSTNAME=$(prompt_until_valid ... validate_hostname), etc., then calls review_and_confirm with a rendered summary before apply."
+    },
+    {
+      "id": "VALIDATORS",
+      "description": "Input validators for hostname, username, timezone, IP/CIDR, and disk, used in both TUI loops and unattended config load. Satisfies PROV-015.",
+      "trigger": "Operator inputs reach config/disk without regex/whitelist/existence validation.",
+      "implementation": "validate_hostname(){ printf '%s' \"$1\" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'; }\nvalidate_username(){ printf '%s' \"$1\" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; }\nvalidate_timezone(){ [ -f \"/usr/share/zoneinfo/$1\" ]; }\nvalidate_ipcidr(){ printf '%s' \"$1\" | grep -Eq '^([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]{1,2})?$'; }\nvalidate_disk(){ [ -b \"$1\" ]; }",
+      "placement": "Sourced before WHIPTAIL_MENU_SKELETON; called by prompt_until_valid (interactive) and by load_config() (unattended) which die()s ERR_VALIDATE on failure."
+    },
+    {
+      "id": "LUKS_PARTITION_FLOW",
+      "description": "Arch/manual LUKS2 + LVM full-disk-encryption flow with the passphrase sourced from prompt/env/keyfile (never embedded), correct crypttab and initramfs HOOKS, firmware-aware ESP. Satisfies PROV-016, PROV-020.",
+      "trigger": "Encryption is requested but luksFormat is missing, uses luks1, embeds the passphrase, or omits crypttab/initramfs wiring.",
+      "implementation": "luks_lvm_setup(){ local disk=\"$1\" vg=\"${2:-vg0}\"\n  # passphrase: env LUKS_PASSPHRASE (unattended) or double-entry prompt (interactive); never logged/embedded\n  local pass\n  if [ \"$MODE\" = unattended ]; then pass=\"${LUKS_PASSPHRASE:?LUKS_PASSPHRASE required for unattended encryption}\"\n  else local p1 p2; p1=$(tui_pass 'LUKS' 'Disk passphrase:'); p2=$(tui_pass 'LUKS' 'Repeat:'); [ \"$p1\" = \"$p2\" ] || die 'passphrases differ' \"$ERR_ABORT\"; [ \"${#p1}\" -ge 8 ] || die 'passphrase too short' \"$ERR_ABORT\"; pass=$p1; fi\n  confirm_destroy \"$disk\"\n  run wipefs -a \"$disk\"; run sgdisk --zap-all \"$disk\"\n  if [ \"$FIRMWARE\" = uefi ]; then run sgdisk -n1:0:+512M -t1:ef00 -c1:ESP \"$disk\"; run sgdisk -n2:0:0 -t2:8309 -c2:crypt \"$disk\"; else run sgdisk -n1:0:+1M -t1:ef02 \"$disk\"; run sgdisk -n2:0:+512M \"$disk\"; run sgdisk -n3:0:0 -t3:8309 \"$disk\"; fi\n  local cryptpart; cryptpart=$(lsblk -nrpo NAME \"$disk\" | grep -E 'crypt$|p?3$|p?2$' | tail -1)\n  printf '%s' \"$pass\" | run cryptsetup luksFormat --type luks2 \"$cryptpart\" -\n  printf '%s' \"$pass\" | run cryptsetup open \"$cryptpart\" cryptlvm -\n  run pvcreate /dev/mapper/cryptlvm; run vgcreate \"$vg\" /dev/mapper/cryptlvm\n  run lvcreate -L 4G -n swap \"$vg\"; run lvcreate -l 100%FREE -n root \"$vg\"\n  run mkfs.ext4 \"/dev/$vg/root\"; run mkswap \"/dev/$vg/swap\"\n  CRYPTS+=(cryptlvm); unset pass p1 p2 2>/dev/null || true; export CRYPT_PART=\"$cryptpart\"; }",
+      "placement": "Arch installer path before pacstrap; the arch-chroot tail must add `encrypt lvm2` to mkinitcpio HOOKS and the bootloader cmdline `cryptdevice=UUID=$(blkid -s UUID -o value $CRYPT_PART):cryptlvm root=/dev/$vg/root`. For ks/autoinstall/AutoYaST use the native encrypted directives, passphrase supplied at apply-time."
+    },
+    {
+      "id": "VALIDATE_CONFIG",
+      "description": "Family-dispatched generated-config validator that fails closed before apply. Satisfies PROV-007.",
+      "trigger": "Generated Kickstart/autoinstall/preseed/AutoYaST/cloud-init is used without schema validation.",
+      "implementation": "validate_config(){ local family=\"$1\" file=\"$2\"\n  case \"$family\" in\n    rhel) command -v ksvalidator >/dev/null && { ksvalidator \"$file\" || die 'ksvalidator failed' \"$ERR_VALIDATE\"; } ;;\n    ubuntu|cloud-init) command -v cloud-init >/dev/null && { cloud-init schema --config-file \"$file\" || die 'cloud-init schema failed' \"$ERR_VALIDATE\"; } ;;\n    debian) debconf-set-selections -c \"$file\" || die 'preseed checkonly failed' \"$ERR_VALIDATE\" ;;\n    suse) xmllint --noout \"$file\" || die 'AutoYaST XML malformed' \"$ERR_VALIDATE\" ;;\n  esac; log \"config validated ($family): $file\"; }",
+      "placement": "Called by every generate_<family>() right after rendering and (in --dry-run) printed; apply refuses to start if validation did not pass."
+    },
+    {
+      "id": "KICKSTART_SCAFFOLD",
+      "description": "Parameterized Kickstart with %packages, LVM (+ optional LUKS), firmware-aware bootloader, hashed rootpw, %pre and a %post --log secure hook. Satisfies PROV-017, PROV-009, PROV-016.",
+      "trigger": "RHEL-family target lacks a complete, validator-clean Kickstart.",
+      "implementation": "gen_kickstart(){ local out=\"$1\"; local bl; [ \"$FIRMWARE\" = uefi ] && bl='--location=boot' || bl='--location=mbr'\n  local enc=''; [ \"${ENCRYPT:-0}\" = 1 ] && enc='--encrypted --luks-version=luks2 --passphrase='\"${LUKS_PASSPHRASE:?}\"\n  cat > \"$out\" <<EOF\ntext\nlang en_US.UTF-8\nkeyboard us\ntimezone ${TZ:-UTC} --utc\nnetwork --bootproto=dhcp --hostname=${HOSTNAME:?} --activate\nrootpw --iscrypted $(openssl passwd -6 \"${ROOT_PW:?}\")\nuser --name=${USERNAME:?} --groups=wheel --iscrypted --password=$(openssl passwd -6 \"${USER_PW:?}\")\nsshkey --username=${USERNAME} \"${SSH_PUBKEY:?}\"\nselinux --enforcing\nfirewall --enabled --ssh\nbootloader ${bl}\nzerombr\nclearpart --all --initlabel --drives=$(basename \"${TARGET_DISK:?}\")\npart /boot --fstype=ext4 --size=1024\npart pv.01 --size=1 --grow ${enc}\nvolgroup vg0 pv.01\nlogvol / --vgname=vg0 --name=root --fstype=xfs --size=1 --grow\nlogvol swap --vgname=vg0 --name=swap --size=4096\nfirstboot --disable\nreboot\n%packages\n@^minimal-environment\nopenssh-server\nfirewalld\nfail2ban\ndnf-automatic\n%end\n%post --log=/root/ks-post.log\nsystemctl enable --now firewalld; firewall-cmd --permanent --add-service=ssh; firewall-cmd --reload\nsed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication no/;s/^#\\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config\nsystemctl enable sshd fail2ban; sed -i 's/^apply_updates.*/apply_updates = yes/' /etc/dnf/automatic.conf; systemctl enable --now dnf-automatic.timer\ndnf -y --security upgrade || true\necho \"provisioned $(date -u) cfg=${CONFIG_SHA:-na}\" > /etc/provision-stamp\n%end\nEOF\n  validate_config rhel \"$out\"; }",
+      "placement": "generate_rhel(); the produced .ks is served via inst.ks=/Kickstart URL or embedded in the boot ISO; for unattended add `inst.ks` + `inst.text` boot args."
+    },
+    {
+      "id": "AUTOINSTALL_SCAFFOLD",
+      "description": "Ubuntu Subiquity autoinstall user-data (#cloud-config + autoinstall:v1) with hashed password, key-only ssh, storage layout switch (direct/lvm/zfs or dm_crypt LUKS), and curtin in-target hardening late-commands. Satisfies PROV-018, PROV-009, PROV-010, PROV-016.",
+      "trigger": "Ubuntu >=20.04 target lacks a schema-valid autoinstall file or still prompts in the installer.",
+      "implementation": "gen_autoinstall(){ local out=\"$1\"; local layout=\"${STORAGE:-lvm}\"\n  local storage_block\n  if [ \"${ENCRYPT:-0}\" = 1 ]; then storage_block=\"    layout: {name: lvm, password: ${LUKS_PASSPHRASE:?}}\"; else storage_block=\"    layout: {name: ${layout}}\"; fi\n  cat > \"$out\" <<EOF\n#cloud-config\nautoinstall:\n  version: 1\n  locale: en_US.UTF-8\n  keyboard: {layout: us}\n  identity:\n    hostname: ${HOSTNAME:?}\n    username: ${USERNAME:?}\n    password: \"$(openssl passwd -6 \"${USER_PW:?}\")\"\n  ssh:\n    install-server: true\n    allow-pw: false\n    authorized-keys: [\"${SSH_PUBKEY:?}\"]\n  storage:\n${storage_block}\n  packages: [openssh-server, ufw, fail2ban, unattended-upgrades]\n  late-commands:\n    - curtin in-target --target=/target -- bash -c 'ufw --force enable; ufw allow OpenSSH'\n    - curtin in-target --target=/target -- sed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config\n    - curtin in-target --target=/target -- systemctl enable fail2ban\n    - curtin in-target --target=/target -- dpkg-reconfigure -f noninteractive unattended-upgrades\n    - curtin in-target --target=/target -- bash -c 'echo provisioned > /etc/provision-stamp'\nEOF\n  validate_config ubuntu \"$out\"; }",
+      "placement": "generate_ubuntu(); served via a NoCloud seed (CLOUDINIT_SCAFFOLD's cidata ISO) or an HTTP datasource, with kernel cmdline `autoinstall ds=nocloud-net;s=<url>`."
+    },
+    {
+      "id": "PRESEED_SCAFFOLD",
+      "description": "Debian classic preseed with partman LVM+crypto recipe, crypted passwords, pkgsel, firmware-aware grub, and an in-target late_command hardening hook. Satisfies PROV-019, PROV-009, PROV-010, PROV-016.",
+      "trigger": "Legacy d-i / Debian target requires preseed but it is incomplete or non-validating.",
+      "implementation": "gen_preseed(){ local out=\"$1\"; local recipe='partman-auto-lvm/new_vg_name string vg0'\n  cat > \"$out\" <<EOF\nd-i debian-installer/locale string en_US.UTF-8\nd-i keyboard-configuration/xkb-keymap select us\nd-i netcfg/get_hostname string ${HOSTNAME:?}\nd-i mirror/http/hostname string deb.debian.org\nd-i mirror/http/directory string /debian\nd-i passwd/root-password-crypted password $(openssl passwd -6 \"${ROOT_PW:?}\")\nd-i passwd/user-fullname string ${USERNAME:?}\nd-i passwd/username string ${USERNAME}\nd-i passwd/user-password-crypted password $(openssl passwd -6 \"${USER_PW:?}\")\nd-i partman-auto/method string $([ \"${ENCRYPT:-0}\" = 1 ] && echo crypto || echo lvm)\nd-i partman-auto/disk string ${TARGET_DISK:?}\nd-i partman-auto-lvm/guided_size string max\nd-i partman/confirm boolean true\nd-i partman/confirm_nooverwrite boolean true\nd-i partman-lvm/confirm boolean true\nd-i grub-installer/bootdev string ${TARGET_DISK}\nd-i pkgsel/include string openssh-server ufw fail2ban unattended-upgrades\nd-i finish-install/reboot_in_progress note\nd-i preseed/late_command string in-target sh -c 'ufw --force enable; ufw allow OpenSSH; sed -i \"s/^#\\?PasswordAuthentication.*/PasswordAuthentication no/\" /etc/ssh/sshd_config; systemctl enable fail2ban; dpkg-reconfigure -f noninteractive unattended-upgrades; echo provisioned > /etc/provision-stamp'\nEOF\n  validate_config debian \"$out\"; }",
+      "placement": "generate_debian() under --legacy-preseed; delivered via `auto=true priority=critical preseed/url=<url>` boot args."
+    },
+    {
+      "id": "ARCH_INSTALLER_SCAFFOLD",
+      "description": "Ordered Arch installer: partition/luks/lvm/mkfs/mount -> pacstrap -> genfstab -> arch-chroot config (timezone/locale/hostname/initramfs HOOKS/bootloader/user/ssh/secure hook), with verified keyring/mirrors and reverse-order teardown via the EXIT trap. Satisfies PROV-020, PROV-016, PROV-010, PROV-005.",
+      "trigger": "Arch target uses an ad-hoc/incomplete pacstrap script or wrong ordering/HOOKS.",
+      "implementation": "install_arch(){ local disk=\"${TARGET_DISK:?}\" vg=vg0\n  retry 3 pacman -Sy --noconfirm archlinux-keyring\n  if [ \"${ENCRYPT:-0}\" = 1 ]; then luks_lvm_setup \"$disk\" \"$vg\"; else confirm_destroy \"$disk\"; run wipefs -a \"$disk\"; run sgdisk --zap-all \"$disk\"\n    [ \"$FIRMWARE\" = uefi ] && { run sgdisk -n1:0:+512M -t1:ef00 \"$disk\"; run sgdisk -n2:0:0 \"$disk\"; } || { run sgdisk -n1:0:+1M -t1:ef02 \"$disk\"; run sgdisk -n2:0:0 \"$disk\"; }\n    run pvcreate \"${disk}2\"; run vgcreate \"$vg\" \"${disk}2\"; run lvcreate -L4G -nswap \"$vg\"; run lvcreate -l100%FREE -nroot \"$vg\"; run mkfs.ext4 \"/dev/$vg/root\"; run mkswap \"/dev/$vg/swap\"; fi\n  run mount \"/dev/$vg/root\" /mnt; MOUNTS+=(/mnt); run mkdir -p /mnt/boot\n  local esp; esp=$(lsblk -nrpo NAME,PARTTYPE \"$disk\" | awk '/ef00|ef02/{print $1; exit}'); [ \"$FIRMWARE\" = uefi ] && { run mkfs.fat -F32 \"$esp\"; run mount \"$esp\" /mnt/boot; }\n  run swapon \"/dev/$vg/swap\"\n  retry 3 pacstrap -K /mnt base linux linux-firmware lvm2 openssh ufw fail2ban sudo grub $([ \"$FIRMWARE\" = uefi ] && echo efibootmgr)\n  genfstab -U /mnt >> /mnt/etc/fstab\n  local hooks='base udev autodetect modconf kms keyboard keymap consolefont block'\n  [ \"${ENCRYPT:-0}\" = 1 ] && hooks=\"$hooks encrypt lvm2 filesystems fsck\" || hooks=\"$hooks lvm2 filesystems fsck\"\n  arch-chroot /mnt /bin/bash -euo pipefail <<CHROOT\nln -sf /usr/share/zoneinfo/${TZ:-UTC} /etc/localtime; hwclock --systohc\nsed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; echo 'LANG=en_US.UTF-8' > /etc/locale.conf\necho '${HOSTNAME:?}' > /etc/hostname\nsed -i 's/^HOOKS=.*/HOOKS=($hooks)/' /etc/mkinitcpio.conf; mkinitcpio -P\nuseradd -m -G wheel -s /bin/bash ${USERNAME:?}; echo '${USERNAME}:$(openssl passwd -6 \"${USER_PW:?}\")' | chpasswd -e\nmkdir -p /home/${USERNAME}/.ssh; echo '${SSH_PUBKEY:?}' > /home/${USERNAME}/.ssh/authorized_keys; chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.ssh; chmod 700 /home/${USERNAME}/.ssh; chmod 600 /home/${USERNAME}/.ssh/authorized_keys\necho '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel\nsed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication no/;s/^#\\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config\nsystemctl enable sshd fail2ban\nufw --force enable; ufw allow OpenSSH; systemctl enable ufw\n$([ \"$FIRMWARE\" = uefi ] && echo 'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH' || echo \"grub-install --target=i386-pc $disk\")\n$([ \"${ENCRYPT:-0}\" = 1 ] && echo \"sed -i 's#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\\\\\"cryptdevice=UUID=\\$(blkid -s UUID -o value $CRYPT_PART):cryptlvm root=/dev/$vg/root\\\\\"#' /etc/default/grub\")\ngrub-mkconfig -o /boot/grub/grub.cfg\necho provisioned > /etc/provision-stamp\nCHROOT\n  log 'arch install complete'; }",
+      "placement": "generate/apply for FAMILY=arch; runs entirely from the Arch live ISO. The EXIT trap (LOGGING) unmounts /mnt and closes cryptlvm on any failure."
+    },
+    {
+      "id": "AUTOYAST_SCAFFOLD",
+      "description": "Parameterized AutoYaST XML with partitioning (LVM/encryption), software, hashed users, bootloader, security, and a chroot post-script hardening hook; validated for well-formedness. Satisfies PROV-021, PROV-009, PROV-010.",
+      "trigger": "SUSE target lacks a valid AutoYaST profile.",
+      "implementation": "gen_autoyast(){ local out=\"$1\"\n  cat > \"$out\" <<EOF\n<?xml version=\"1.0\"?>\n<!DOCTYPE profile>\n<profile xmlns=\"http://www.suse.com/1.0/yast2ns\" xmlns:config=\"http://www.suse.com/1.0/configns\">\n  <general><mode><confirm config:type=\"boolean\">false</confirm></mode></general>\n  <networking><dns><hostname>${HOSTNAME:?}</hostname></dns></networking>\n  <partitioning config:type=\"list\"><drive>\n    <device>${TARGET_DISK:?}</device><use>all</use>\n    <enable_snapshots config:type=\"boolean\">true</enable_snapshots>\n    $([ \"${ENCRYPT:-0}\" = 1 ] && echo '<encryption_method>luks2</encryption_method>')\n  </drive></partitioning>\n  <software><patterns config:type=\"list\"><pattern>base</pattern><pattern>minimal_base</pattern></patterns>\n    <packages config:type=\"list\"><package>openssh</package><package>firewalld</package><package>fail2ban</package></packages></software>\n  <users config:type=\"list\">\n    <user><username>root</username><user_password>$(openssl passwd -6 \"${ROOT_PW:?}\")</user_password><encrypted config:type=\"boolean\">true</encrypted></user>\n    <user><username>${USERNAME:?}</username><user_password>$(openssl passwd -6 \"${USER_PW:?}\")</user_password><encrypted config:type=\"boolean\">true</encrypted></user>\n  </users>\n  <scripts><chroot-scripts config:type=\"list\"><script><chrooted config:type=\"boolean\">true</chrooted><source><![CDATA[\n#!/bin/bash\nsystemctl enable sshd firewalld fail2ban\nfirewall-cmd --permanent --add-service=ssh\nsed -i 's/^#\\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config\necho provisioned > /etc/provision-stamp\n]]></source></script></chroot-scripts></scripts>\n</profile>\nEOF\n  validate_config suse \"$out\"; }",
+      "placement": "generate_suse(); delivered via `autoyast=<url>` boot parameter."
+    },
+    {
+      "id": "CLOUDINIT_SCAFFOLD",
+      "description": "Generic cloud-init user-data + meta-data with key-only users, ssh_pwauth off, package upgrade, and hardening runcmd; builds a labeled cidata NoCloud seed ISO. Satisfies PROV-022, PROV-009, PROV-010.",
+      "trigger": "Cloud/VM image target needs cloud-init but lacks a schema-valid, key-only seed.",
+      "implementation": "gen_cloudinit(){ local dir=\"$1\"; mkdir -p \"$dir\"\n  cat > \"$dir/user-data\" <<EOF\n#cloud-config\nhostname: ${HOSTNAME:?}\nssh_pwauth: false\nusers:\n  - name: ${USERNAME:?}\n    groups: [sudo]\n    sudo: 'ALL=(ALL) NOPASSWD:ALL'\n    lock_passwd: true\n    ssh_authorized_keys: [\"${SSH_PUBKEY:?}\"]\npackage_update: true\npackage_upgrade: true\npackages: [openssh-server, ufw, fail2ban, unattended-upgrades]\nruncmd:\n  - [bash, -c, 'ufw --force enable && ufw allow OpenSSH']\n  - [sed, -i, 's/^#\\\\?PasswordAuthentication.*/PasswordAuthentication no/', /etc/ssh/sshd_config]\n  - [systemctl, enable, --now, fail2ban]\n  - [bash, -c, 'echo provisioned > /etc/provision-stamp']\nEOF\n  printf 'instance-id: %s\\nlocal-hostname: %s\\n' \"${HOSTNAME}-$(date +%s)\" \"${HOSTNAME}\" > \"$dir/meta-data\"\n  validate_config cloud-init \"$dir/user-data\"\n  command -v genisoimage >/dev/null && run genisoimage -output \"$dir/seed.iso\" -volid cidata -joliet -rock \"$dir/user-data\" \"$dir/meta-data\"; }",
+      "placement": "generate_cloudinit(); seed.iso is attached as a second drive (NoCloud) or user-data is handed to the platform datasource."
+    },
+    {
+      "id": "REPRODUCIBILITY_STAMP",
+      "description": "Centralize inputs in one sourced config, normalize nondeterministic fields, and emit a config hash for diff-review and provenance. Satisfies PROV-014, PROV-024.",
+      "trigger": "Inputs are scattered/hardcoded or generated config varies run-to-run.",
+      "implementation": "load_config(){ [ -n \"${CONFIG:-}\" ] && [ -f \"$CONFIG\" ] && . \"$CONFIG\"\n  : \"${HOSTNAME:?}\" \"${USERNAME:?}\" \"${TZ:=UTC}\" \"${TARGET_DISK:?}\" \"${SSH_PUBKEY:?}\"\n  validate_hostname \"$HOSTNAME\" || die \"bad hostname\" \"$ERR_VALIDATE\"\n  validate_username \"$USERNAME\" || die \"bad username\" \"$ERR_VALIDATE\"\n  validate_timezone \"$TZ\" || die \"bad timezone\" \"$ERR_VALIDATE\"\n  [ \"$MODE\" = unattended ] && validate_target \"$TARGET_DISK\"\n  PKGS=$(printf '%s\\n' ${PKGS:-} | sort -u | tr '\\n' ' ')\n  CONFIG_SHA=$(sha256sum \"${CONFIG:-/dev/null}\" 2>/dev/null | cut -d' ' -f1); export CONFIG_SHA; log \"config sha=$CONFIG_SHA\"; }",
+      "placement": "After FLAG_PLUMBING + VALIDATORS, before any generator; CONFIG_SHA is embedded into the /etc/provision-stamp in each family's post hook for provenance."
+    }
+  ]
+}
