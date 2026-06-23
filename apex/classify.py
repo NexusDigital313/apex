@@ -194,19 +194,37 @@ def _score(text: str, signatures: List[Dict]) -> Tuple[float, List[str]]:
 def classify(text: str, filename: str = "") -> ClassificationResult:
     domains = _load_domains()
     scores: Dict[str, float] = {}
-    all_matched: List[str] = []
-    best_domain = "generic"
-    best_score = 0.0
-    best_matched: List[str] = []
+    matched_by: Dict[str, List[str]] = {}
 
     for key, cfg in domains.items():
         score, matched = _score(text, cfg.get("signatures", []))
         scores[key] = round(score, 2)
-        if score >= cfg.get("min_confidence", 3.0) and score > best_score:
-            best_domain = key
-            best_score = score
-            best_matched = matched
-        all_matched.extend(matched)
+        matched_by[key] = matched
+
+    # Rank the real (non-generic) domains; generic is the fall-through floor, never
+    # a scored competitor.
+    ranked = sorted(
+        ((k, scores[k]) for k in domains if k != "generic"),
+        key=lambda kv: -kv[1],
+    )
+
+    best_domain = "generic"
+    best_score = 0.0
+    best_matched: List[str] = []
+
+    if ranked:
+        top_key, top_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        min_conf = domains[top_key].get("min_confidence", 3.0)
+        # Claim the domain only when the signal is real (clears threshold), broad
+        # (≥2 distinct signatures, not one incidental keyword), and decisive
+        # (beats the runner-up by the margin). Otherwise degrade to generic.
+        if (top_score >= min_conf
+                and len(matched_by[top_key]) >= _MIN_DISTINCT
+                and (top_score - second_score) >= _MARGIN):
+            best_domain = top_key
+            best_score = top_score
+            best_matched = matched_by[top_key]
 
     if best_domain == "generic":
         # confidence for generic = how production-ready it already looks (low = needs work)
