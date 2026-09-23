@@ -1,3 +1,3 @@
-# APEX runs fully offline (deterministic engine) with zero dependencies.
-# The intelligent (LLM) engine needs the Anthropic SDK and ANTHROPIC_API_KEY:
-anthropic>=0.40
+# APEX runs fully offline with ZERO third-party dependencies (Python 3.8+ stdlib only).
+# The deterministic, content-aware ("self-driving") engine is the only engine —
+# there is no network call, no API key, and nothing to install.

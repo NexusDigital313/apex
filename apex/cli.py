@@ -1,8 +1,9 @@
 """APEX command-line interface.
 
-    apex elevate <script> [--mode auto|deterministic|llm] [options]
+    apex elevate <script> [options]
     apex check   <script>
     apex list
+    apex banner
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ import sys
 from typing import Dict, List, Optional
 
 from . import __version__
+from . import banner as banner_mod
 from . import classify as classify_mod
 from . import engine_deterministic as det
-from . import engine_llm as llm
 from . import report as report_mod
 from . import validate as validate_mod
 from .rubrics import Rubric, load_rubrics
@@ -64,6 +65,8 @@ def _pick_rubric(rubrics: Dict[str, Rubric], domain: str) -> Optional[Rubric]:
 
 def cmd_list(args: argparse.Namespace) -> int:
     c = C(_supports_color())
+    if not getattr(args, "no_banner", False):
+        banner_mod.emit()
     rubrics = load_rubrics()
     if not rubrics:
         print(c.red("no rubrics found in rubrics/"))
@@ -76,6 +79,12 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("  {0}{1}".format(" " * 16, c.dim("{0} controls, {1} deterministic transforms".format(
             len(r.controls), len(r.transforms)))))
         print()
+    return 0
+
+
+def cmd_banner(args: argparse.Namespace) -> int:
+    # explicit request: always print; colourised only on a capable TTY
+    sys.stdout.write(banner_mod.render(color=banner_mod.supports_banner()) + "\n")
     return 0
 
 
@@ -121,42 +130,28 @@ def cmd_elevate(args: argparse.Namespace) -> int:
         c.cyan(cls.domain), c.bold(rubric.target_standard),
         c.dim("(confidence {0})".format(cls.confidence))))
 
-    mode = args.mode
-    llm_ok = llm.available()
-    if mode == "auto":
-        mode = "llm" if llm_ok else "deterministic"
-    if mode == "llm" and not llm_ok:
-        emit(c.red("  llm mode requested but ANTHROPIC_API_KEY is not set"))
-        return 2
-
-    # Always run the deterministic pre-pass first (safe, idempotent baseline).
+    # Deterministic, self-driving engine: reads the script, injects only the
+    # blocks it is actually missing. Offline, idempotent, no API key.
     det_res = det.elevate(original, rubric, cls.language)
     elevated = det_res.elevated
-    engine_label = "deterministic"
-    changelog: List[Dict] = []
-    residual: List[str] = []
-    followups: List[str] = []
+    engine_label = "deterministic (self-driving)"
+
+    # Narrate the decision trace so it's obvious APEX read the script.
+    if det_res.decisions:
+        emit(c.dim("  scanned {0} rubric block(s):".format(len(det_res.decisions))))
+        for d in det_res.decisions:
+            if d.verdict == "applied":
+                emit("    {0} {1} {2}".format(c.green("＋"), c.bold(d.id), c.dim(d.reason)))
+            elif d.verdict == "rewritten":
+                emit("    {0} {1} {2}".format(c.yellow("↻"), c.bold(d.id), c.dim(d.reason)))
+            elif d.verdict == "already-present":
+                emit("    {0} {1} {2}".format(c.cyan("＝"), d.id, c.dim(d.reason)))
+            elif d.verdict == "declined":
+                emit("    {0} {1} {2}".format(c.yellow("⊘"), c.dim(d.id), c.dim(d.reason)))
+            else:
+                emit("    {0} {1} {2}".format(c.dim("－"), c.dim(d.id), c.dim(d.reason)))
     for note in det_res.notes:
         emit(c.dim("  note: {0}".format(note)))
-
-    if mode == "llm":
-        emit(c.dim("  invoking {0} for the intelligent rewrite...".format(llm.MODEL)))
-        try:
-            llm_res = llm.elevate(elevated, rubric, cls.language)
-        except llm.LLMUnavailable as exc:
-            emit(c.yellow("  llm pass unavailable ({0}); keeping deterministic result".format(exc)))
-        else:
-            v = validate_mod.validate(llm_res.elevated, cls.language)
-            if v.ok:
-                elevated = llm_res.elevated
-                engine_label = "deterministic + {0}".format(llm.MODEL)
-                changelog = llm_res.changelog
-                residual = llm_res.residual_risks
-                followups = llm_res.manual_followups
-            else:
-                emit(c.yellow("  llm output failed syntax check; keeping deterministic result"))
-                for e in v.errors[:5]:
-                    emit(c.dim("    {0}".format(e)))
 
     # Validate final result.
     final_val = validate_mod.validate(elevated, cls.language)
@@ -169,7 +164,8 @@ def cmd_elevate(args: argparse.Namespace) -> int:
     report = report_mod.build_report(
         cls, rubric, engine_label,
         applied_transforms=det_res.applied,
-        changelog=changelog, residual_risks=residual, manual_followups=followups,
+        rewritten_rewrites=det_res.rewritten,
+        decisions=det_res.decisions,
         validation_tool=final_val.tool, validation_warnings=final_val.warnings,
     )
 
@@ -196,9 +192,15 @@ def cmd_elevate(args: argparse.Namespace) -> int:
         diff = report_mod.unified_diff(original, elevated, os.path.basename(args.script))
         sys.stdout.write("\n" + _colorize_diff(diff, c) + "\n")
 
-    n_changes = len(changelog) or len(det_res.applied)
-    emit(c.bold("  done: {0} change(s), engine={1}{2}".format(
-        n_changes, engine_label, ", syntax OK" if final_val.ok else ", SYNTAX ERRORS")))
+    summary = ["{0} change(s)".format(len(det_res.applied))]
+    if det_res.rewritten:
+        summary.append("{0} rewrite(s)".format(len(det_res.rewritten)))
+    n_skip = len(det_res.skipped) + len(det_res.not_needed)
+    if n_skip:
+        summary.append("{0} block(s) not needed".format(n_skip))
+    emit(c.bold("  done: {0}, engine={1}{2}".format(
+        ", ".join(summary), engine_label,
+        ", syntax OK" if final_val.ok else ", SYNTAX ERRORS")))
     return 0 if final_val.ok else 1
 
 
@@ -250,12 +252,11 @@ def build_parser() -> argparse.ArgumentParser:
                     "(CIS->STIG, forensic->courtroom, installer->unattended, *->production-grade).",
     )
     p.add_argument("--version", action="version", version="apex {0}".format(__version__))
+    p.add_argument("--no-banner", action="store_true", help="suppress the startup banner")
     sub = p.add_subparsers(dest="command")
 
     pe = sub.add_parser("elevate", help="elevate a script to its apex standard")
     pe.add_argument("script")
-    pe.add_argument("--mode", choices=["auto", "deterministic", "llm"], default="auto",
-                    help="auto (default): use the LLM if ANTHROPIC_API_KEY is set, else deterministic")
     pe.add_argument("-o", "--output", help="write elevated script here (default: <name>.apex.<ext>)")
     pe.add_argument("--report", help="write report here ('-' to skip; default <out>.report.md)")
     pe.add_argument("--in-place", action="store_true", help="overwrite the input (keeps <name>.apex.bak)")
@@ -270,6 +271,9 @@ def build_parser() -> argparse.ArgumentParser:
     pl = sub.add_parser("list", help="list domains and their apex standards")
     pl.set_defaults(func=cmd_list)
 
+    pb = sub.add_parser("banner", help="print the APEX banner")
+    pb.set_defaults(func=cmd_banner)
+
     return p
 
 
@@ -277,6 +281,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):
+        if not getattr(args, "no_banner", False):
+            banner_mod.emit()
         parser.print_help()
         return 0
     try:
