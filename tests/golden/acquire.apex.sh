@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# quick disk image
 
 # ===== APEX elevation preamble :: Courtroom-admissible acquisition: FRE 901/902 authentication & self-authentication, Daubert reliability, NIST SP 800-86 (IR forensics), NIST SP 800-101r1 (mobile), ACPO 4 principles, SWGDE Best Practices for Computer/Image Acquisition, ISO/IEC 27037:2012, RFC 3227 (order of volatility), RFC 3161 (timestamping) =====
 # >>> APEX[DT-STRICT-TRAP] Enforce abort-on-any-error and a contemporaneous failure record. Adds strict mode and an ERR trap that logs the exact failing command, line number, and UTC time, then exits non-zero so no downstream seal/sign can run on a broken acquisition; the EXIT handler seals only on a clean exit. Satisfies FOR-SET-EUO-TRAP and feeds FOR-CMDLINE-RECORD. >>>
@@ -197,7 +198,6 @@ _apex_seal(){
 # <<< APEX[DT-SEAL] <<<
 # ===== end APEX preamble =====
 
-# quick disk image
 SRC=$1
 OUT=$2
 acquire_image $SRC $OUT

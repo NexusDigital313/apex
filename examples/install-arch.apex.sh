@@ -1,4 +1,5 @@
 #!/bin/bash
+# automate arch install
 
 # ===== APEX elevation preamble :: Production-grade automated/interactive OS provisioning: Kickstart (RHEL/Fedora/Rocky/Alma), Debian preseed + Ubuntu Subiquity autoinstall/cloud-init, Arch pacstrap installer, SUSE AutoYaST, generic cloud-init; aligned to vendor reference docs, CIS-style secure post-install, and reproducible-config / dry-run / fail-closed automation discipline. =====
 # >>> APEX[FLAG_PLUMBING] Resolve mode and the --assume-yes/--interactive/--dry-run/--family flags into single variables, with mutual-exclusion errors, TTY auto-detect, and a documented exit-code table. Satisfies PROV-001, PROV-006, PROV-012, PROV-024. >>>
@@ -367,7 +368,6 @@ load_config(){ [ -n "${CONFIG:-}" ] && [ -f "$CONFIG" ] && . "$CONFIG"
 # <<< APEX[REPRODUCIBILITY_STAMP] <<<
 # ===== end APEX preamble =====
 
-# automate arch install
 DISK=/dev/sda
 parted -s $DISK mklabel gpt
 parted -s $DISK mkpart primary 1MiB 100%

@@ -362,6 +362,12 @@ class Runner:
         # one keyword listed in both signature sets is not a domain
         self.check("lone keyword -> generic", classify_mod.classify("pacstrap\n").domain == "generic")
 
+        # a copyright/license notice under the shebang stays at the top
+        notice = "#!/bin/bash\n# Copyright (c) 2026 Example. All Rights Reserved.\n# Proprietary.\n\nrm -rf \"$X\"\n"
+        top = det.elevate(notice, g, "shell").elevated.splitlines()[:3]
+        self.check("notice stays under the shebang",
+                   top == ["#!/bin/bash", "# Copyright (c) 2026 Example. All Rights Reserved.", "# Proprietary."], str(top))
+
         # --in-place: exact backup, permissions kept
         src = os.path.join(tmp, "inplace.sh")
         raw = b"#!/bin/bash\n# caf\xe9\nrm -rf \"$X\"\n"

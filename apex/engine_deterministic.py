@@ -83,6 +83,19 @@ def _wrap(t: Transform) -> str:
     return "{0}\n{1}\n{2}".format(_marker_open(t), t.implementation, _marker_close(t))
 
 
+def _split_header(body: str) -> Tuple[str, str]:
+    """Split off the comment block directly under the shebang (license or
+    copyright notice, description) so it stays at the top of the output instead
+    of being pushed below the preamble. Comments are not logic, so this still
+    honours "preamble before any other logic"."""
+    lines = body.split("\n")
+    n = 0
+    while (n < len(lines) and lines[n].startswith("#")
+           and not lines[n].startswith(("# >>> APEX[", "# ===== "))):
+        n += 1
+    return "\n".join(lines[:n]), "\n".join(lines[n:])
+
+
 def _split_shebang(text: str) -> Tuple[str, str]:
     """Return (shebang_line_without_newline, rest)."""
     if text.startswith("#!"):
@@ -345,6 +358,7 @@ def elevate(text: str, rubric: Rubric, language: str = "shell",
 
     validate_fn = validator or _default_validator
     shebang, body = _split_shebang(text)
+    header, body = _split_header(body)
     # Evaluate every self-driving gate against the user's own code, never
     # against blocks APEX injected on a previous pass.
     scan_text = _user_code(text)
@@ -377,6 +391,8 @@ def elevate(text: str, rubric: Rubric, language: str = "shell",
     new_shebang = _bash_shebang(shebang)
     upgraded = new_shebang is not None
     out_shebang = new_shebang if upgraded else shebang
+    if header:
+        out_shebang += "\n" + header
 
     def _assemble(_body: str) -> str:
         return _render(out_shebang, preamble_blocks, _body, append_blocks, rubric)
