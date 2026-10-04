@@ -11,12 +11,18 @@
 # >>> APEX[DT-STRICT-TRAP] Enforce abort-on-any-error and a contemporaneous failure record. Adds strict mode and an ERR trap that logs the exact failing command, line number, and UTC time, then exits non-zero so no downstream seal/sign can run on a broken acquisition; the EXIT handler seals only on a clean exit. Satisfies FOR-SET-EUO-TRAP and feeds FOR-CMDLINE-RECORD. >>>
 set -Eeuo pipefail
 : "${COC_LOG:?COC_LOG (chain-of-custody log path) must be set}"
+# absolute, so a script that changes directory keeps writing the same custody log
+case $COC_LOG in /*) ;; *) COC_LOG=$PWD/$COC_LOG ;; esac
 _log(){ printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$COC_LOG" >&2; }
-_fatal(){ _log "FATAL line:${BASH_LINENO[0]:-?} cmd:[${BASH_COMMAND}] rc:$?"; _log 'ABORT: acquisition not verified — DO NOT use output as evidence'; exit 1; }
+_fatal(){ _log "FATAL line:${BASH_LINENO[0]:-?} cmd:[${BASH_COMMAND}] rc:$?"; _log 'ABORT: acquisition not verified — DO NOT use output as evidence'; APEX_ABORTED=1; exit 1; }
 # a clean exit seals the evidence even when the script's own code ends in `exit 0`
 _apex_exit(){
   local rc=$?
   if [ "$rc" = 0 ] && declare -F _apex_seal >/dev/null; then _apex_seal; fi
+  # a failure that bypassed the ERR trap (set -u, an explicit exit 1) is still an abort
+  if [ "$rc" != 0 ] && [ -z "${APEX_ABORTED:-}" ]; then
+    _log 'ABORT: acquisition not verified — DO NOT use output as evidence'
+  fi
   _log "EXIT rc:$rc"
 }
 trap _fatal ERR
@@ -37,7 +43,7 @@ _log '===== CHAIN OF CUSTODY ====='
 _log "WHO     examiner=$EXAMINER org=$EXAMINER_ORG creds=$EXAMINER_CREDS"
 _log "WHAT    evidence_id=$EVIDENCE_ID source=$SOURCE_DESC"
 _log "WHEN    start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-_log "WHERE   location=$LOCATION host=$(hostname) kernel=$(uname -a)"
+_log "WHERE   location=$LOCATION host=$(uname -n) kernel=$(uname -a)"
 _log "WHY     case=$CASE_NUMBER purpose=$PURPOSE"
 _log "CLOCK   $(timedatectl 2>/dev/null | tr '\n' ';' || chronyc tracking 2>/dev/null | tr '\n' ';' || echo 'no-sync-info')"
 _log "WBLOCK  hardware_write_blocker=${WRITE_BLOCKER:-NONE-software-RO} attest=${WRITE_BLOCKER_SERIAL:-n/a}"
@@ -118,12 +124,13 @@ verify_dual(){
   [ -n "$s256_src" ] && [ "$s256_src" = "$s256_img" ] || { _log 'FATAL sha256 MISMATCH — image NOT verified'; exit 1; }
   [ -n "$s512_src" ] && [ "$s512_src" = "$s512_img" ] || { _log 'FATAL sha512 MISMATCH — image NOT verified'; exit 1; }
   _log 'VERIFY PASS: dual-hash bit-for-bit match (sha256 & sha512)'
+  APEX_VERIFIED=("$s256_img" "$s512_img")
 }
 # E01 path additionally: ewfverify -d sha256 "$IMAGE" 2>&1 | tee -a "$COC_LOG" || { _log 'FATAL ewfverify failed'; exit 1; }
 # <<< APEX[DT-DUAL-HASH-VERIFY] <<<
 
 # >>> APEX[DT-DD-TO-DC3DD] Define acquire_image, which replaces the script's own bare `dd if=SRC of=IMAGE` (RW-FOR-DD-DC3DD): write-block the source, refuse to clobber, image with dc3dd (dual inline hashes = the pre-acquisition source hash, hashlog, error log), then verify_dual before the script continues. Satisfies FOR-SOUND-IMAGER, FOR-HASHLOG-ERRLOG, FOR-PRE-HASH-SRC, FOR-DUAL-HASH (acquisition side), FOR-BADBLOCK, FOR-IDEMPOTENT. >>>
-APEX_IMAGES=()
+APEX_IMAGES=(); APEX_SHA256=(); APEX_SHA512=()
 # BEFORE:  dd if=$SRC of=$OUT bs=4M
 # AFTER:   acquire_image $SRC $OUT
 acquire_image(){
@@ -146,6 +153,7 @@ acquire_image(){
   _log "PRE-HASH(source via dc3dd) recorded in ${img}.hashlog"
   verify_dual "$img" "${img}.hashlog"
   APEX_IMAGES+=("$(readlink -f -- "$img")")
+  APEX_SHA256+=("${APEX_VERIFIED[0]}"); APEX_SHA512+=("${APEX_VERIFIED[1]}")
 }
 # <<< APEX[DT-DD-TO-DC3DD] <<<
 
@@ -157,22 +165,24 @@ _apex_seal(){
   [ -z "${APEX_SEALED:-}" ] || return 0
   APEX_SEALED=1
   if [ "${#APEX_IMAGES[@]}" -eq 0 ]; then _log 'SEAL skipped: no image was acquired through acquire_image'; return 0; fi
-  local dir bundle img f rel h256 h512
+  local dir bundle img f rel h256 h512 i
   local -A seen=()
   dir=$(dirname -- "${APEX_IMAGES[0]}")
   bundle="${EVIDENCE_ID}_$(date -u +%Y%m%dT%H%M%SZ)"
   # seal a frozen copy of the COC log: xtrace and _log keep appending to the live one
   cp -- "$COC_LOG" "$dir/$bundle.coc.log"
   # manifests: every artifact with both digests, paths relative to $dir. The images
-  # were just hashed by verify_dual, so their digests are reused, not recomputed.
+  # were just hashed by verify_dual, so its digests are reused, not recomputed (and
+  # not re-read from ${img}.sha256, which the script's own code may have rewritten).
   : > "$dir/$bundle.SHA256SUMS"; : > "$dir/$bundle.SHA512SUMS"
-  for img in "${APEX_IMAGES[@]}"; do
+  for i in "${!APEX_IMAGES[@]}"; do
+    img=${APEX_IMAGES[$i]}
     for f in "$img" "$img.hashlog" "$img.dc3dd.log" "$img.sha256" "$img.sha512" "$dir/$bundle.coc.log"; do
       if [ ! -f "$f" ] || [ -n "${seen[$f]:-}" ]; then continue; fi
       seen[$f]=1
       case $f in "$dir"/*) rel=${f#"$dir"/} ;; *) rel=$f ;; esac
       if [ "$f" = "$img" ]; then
-        read -r h256 _ < "$img.sha256"; read -r h512 _ < "$img.sha512"
+        h256=${APEX_SHA256[$i]}; h512=${APEX_SHA512[$i]}
       else
         h256=$(sha256sum < "$f" | awk '{print $1}'); h512=$(sha512sum < "$f" | awk '{print $1}')
       fi
