@@ -240,6 +240,17 @@ def _render(shebang: str, preamble_blocks: List[str], body: str,
     return "\n".join(p for p in parts if p is not None).rstrip("\n") + "\n"
 
 
+def _helper_after_body(tid: str, rubric: Rubric, text: str, applied: List[str]) -> bool:
+    """True when block `tid` ends up below the user's code, so a rewritten call
+    would run before the helper function exists (bash defines top-down)."""
+    if tid in applied:
+        t = next((t for t in rubric.transforms if t.id == tid), None)
+        return t is not None and t.placement == "append"
+    # already in the file from an earlier run: is it in the appended section?
+    header = text.find("# ===== APEX appended helpers =====")
+    return header != -1 and text.find("APEX[{0}]".format(tid)) > header
+
+
 def elevate(text: str, rubric: Rubric, language: str = "shell",
             validator: Optional[Callable[[str], Tuple[bool, str]]] = None) -> DeterministicResult:
     result = DeterministicResult(elevated=text)
@@ -304,6 +315,12 @@ def elevate(text: str, rubric: Rubric, language: str = "shell",
             result.declined.append(rw.id)
             result.decisions.append(Decision(
                 rw.id, "declined", "needs block {0}, which is not present".format(rw.requires_transform)))
+            continue
+        if rw.requires_transform and _helper_after_body(rw.requires_transform, rubric, text, result.applied):
+            result.declined.append(rw.id)
+            result.decisions.append(Decision(
+                rw.id, "declined", "block {0} would be defined after the code that calls it".format(
+                    rw.requires_transform)))
             continue
         try:
             rx = re.compile(rw.pattern, re.MULTILINE)

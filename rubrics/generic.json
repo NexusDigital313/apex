@@ -6,7 +6,7 @@
     {
       "id": "RW-BASH-RM-SAFE",
       "description": "route single-target `rm -rf` through the injected safe_rm() guard",
-      "pattern": "^(?P<indent>[ \\t]*)rm[ \\t]+-[A-Za-z]*[rf][A-Za-z]*(?:[ \\t]+-{1,2}[A-Za-z-]+)*[ \\t]+(?P<target>\"[^\"]*\"|[A-Za-z0-9_./~$][A-Za-z0-9_./~${}@:+=.-]*)[ \\t]*$",
+      "pattern": "^(?P<indent>[ \\t]*)rm[ \\t]+-(?=[rRfv]*[rR])(?=[rRfv]*f)[rRfv]+(?:[ \\t]+--)?[ \\t]+(?P<target>\"[^\"]*\"|[A-Za-z0-9_./~$][A-Za-z0-9_./~${}@:+=.-]*)[ \\t]*$",
       "replacement": "\\g<indent>safe_rm \\g<target>",
       "requires_transform": "DT-BASH-DESTRUCTIVE-GUARD",
       "apply_when": { "language": "shell" }
@@ -446,7 +446,7 @@
         ]
       },
       "implementation": "# --- destructive-operation guard ---------------------------------------\n# Wrap irreversible deletes. Refuses to remove '', '/', '/*', or a bare\n# $HOME; no-ops under --dry-run; requires confirmation unless ASSUME_YES.\nASSUME_YES=\"${ASSUME_YES:-false}\"\nconfirm(){\n  [[ \"$ASSUME_YES\" == true ]] && return 0\n  local reply; printf '%s [y/N] ' \"$1\" >&2; read -r reply\n  [[ \"$reply\" =~ ^[Yy]$ ]]\n}\nsafe_rm(){\n  local target=\"${1:?safe_rm: target required}\"\n  case \"$target\" in\n    \"\"|/|/\\*|\"$HOME\"|\"$HOME/\") die \"${E_USAGE:-2}\" \"refusing to remove unsafe path: '$target'\" ;;\n  esac\n  if [[ \"${DRY_RUN:-false}\" == true ]]; then log INFO \"DRY-RUN: rm -rf -- $target\"; return 0; fi\n  confirm \"remove '$target' recursively?\" || { log WARN \"skipped: $target\"; return 0; }\n  rm -rf -- \"$target\"\n}",
-      "placement": "append"
+      "placement": "After the log/trap scaffold and argument parsing, before the main body. safe_rm() must be defined before the script's own code calls it."
     }
   ]
 }

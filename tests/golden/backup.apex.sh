@@ -91,16 +91,7 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${POSITIONAL[@]:-}"
 # <<< APEX[DT-BASH-ARGPARSE-SKELETON] <<<
-# ===== end APEX preamble =====
 
-# nightly backup
-SRC=/var/www
-DEST=/backups/www-$(date +%F).tar.gz
-tar czf $DEST $SRC
-safe_rm /backups/www-old.tar.gz
-echo backup done
-
-# ===== APEX appended helpers =====
 # >>> APEX[DT-BASH-DESTRUCTIVE-GUARD] Confirmation + dry-run guard for destructive operations (rm -rf, mkfs, dd, truncate). safe_rm() refuses empty/'/'/'~' targets, honors --dry-run, and prompts unless --yes was given. Fires when the script performs irreversible deletes/writes (controls IDEMPOTENCY, CLI-DRY-RUN, BASH-ROOT-GUARD). >>>
 # --- destructive-operation guard ---------------------------------------
 # Wrap irreversible deletes. Refuses to remove '', '/', '/*', or a bare
@@ -121,3 +112,11 @@ safe_rm(){
   rm -rf -- "$target"
 }
 # <<< APEX[DT-BASH-DESTRUCTIVE-GUARD] <<<
+# ===== end APEX preamble =====
+
+# nightly backup
+SRC=/var/www
+DEST=/backups/www-$(date +%F).tar.gz
+tar czf $DEST $SRC
+rm -f /backups/www-old.tar.gz
+echo backup done

@@ -258,6 +258,12 @@ install_arch(){ local disk="${TARGET_DISK:?}" vg=vg0
   genfstab -U /mnt >> /mnt/etc/fstab
   local hooks='base udev autodetect modconf kms keyboard keymap consolefont block'
   [ "${ENCRYPT:-0}" = 1 ] && hooks="$hooks encrypt lvm2 filesystems fsck" || hooks="$hooks lvm2 filesystems fsck"
+  # GRUB commands are built here, on the host, and passed into the chroot as plain
+  # text: a quoted $(...) inside the heredoc is a bash syntax error at run time.
+  local grub_install grub_cmdline=''
+  if [ "$FIRMWARE" = uefi ]; then grub_install='grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH'; else grub_install="grub-install --target=i386-pc $disk"; fi
+  if [ "${ENCRYPT:-0}" = 1 ]; then local crypt_uuid; crypt_uuid=$(blkid -s UUID -o value "${CRYPT_PART:?}")
+    grub_cmdline="sed -i 's#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${crypt_uuid}:cryptlvm root=/dev/${vg}/root\"#' /etc/default/grub"; fi
   arch-chroot /mnt /bin/bash -euo pipefail <<CHROOT
 ln -sf /usr/share/zoneinfo/${TZ:-UTC} /etc/localtime; hwclock --systohc
 sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; echo 'LANG=en_US.UTF-8' > /etc/locale.conf
@@ -269,8 +275,8 @@ echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/;s/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 systemctl enable sshd fail2ban
 ufw --force enable; ufw allow OpenSSH; systemctl enable ufw
-$([ "$FIRMWARE" = uefi ] && echo 'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH' || echo "grub-install --target=i386-pc $disk")
-$([ "${ENCRYPT:-0}" = 1 ] && echo "sed -i 's#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\\"cryptdevice=UUID=\$(blkid -s UUID -o value $CRYPT_PART):cryptlvm root=/dev/$vg/root\\"#' /etc/default/grub")
+$grub_install
+$grub_cmdline
 grub-mkconfig -o /boot/grub/grub.cfg
 echo provisioned > /etc/provision-stamp
 CHROOT
