@@ -25,7 +25,8 @@ APEX has a single **deterministic, self-driving engine**. It:
    with an `APEX[<id>]` marker, and gates are evaluated against your *original* code (APEX's
    own injected blocks are stripped before matching), so **re-running is a guaranteed no-op**.
 4. **Rewrites the script's own lines** toward the standard so the injected helpers are actually
-   *used*, not merely present — e.g. `rm -rf X` → `safe_rm X`, and legacy `` `…` `` →
+   *used*, not merely present — e.g. `rm -rf X` → `safe_rm X`, a forensic `dd if=SRC of=IMG` →
+   `acquire_image SRC IMG` (write-block, `dc3dd`, dual-hash verify), and legacy `` `…` `` →
    `$(…)`. Rewrites are conservative and **fail safe**: they fire only on real code (a thin
    lexer skips APEX blocks, heredoc bodies, quoted strings and comments), decline anything
    ambiguous (multi-target / glob / command-substitution), and every rewrite is parsed as part

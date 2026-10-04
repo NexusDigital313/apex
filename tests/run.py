@@ -181,6 +181,24 @@ class Runner:
         self.check("backticks -> $()", body_has('d=`date +%F`\n', "d=$(date +%F)"))
         self.check("backticks in '' preserved", body_has("echo '`literal`'\n", "'`literal`'"))
 
+        # forensic: the script's own bare dd becomes the verified acquisition, and only
+        # a dd that reads the whole source into an image file is rewritten
+        f = _RUBRICS["forensic"]
+
+        def acquired(snippet: str) -> bool:
+            res = det.elevate("#!/bin/bash\n" + snippet, f, "shell")
+            return "RW-FOR-DD-DC3DD" in res.rewritten
+
+        out = _elevate(open(os.path.join(EX_DIR, "acquire.sh"), encoding="utf-8").read()).elevated
+        user = _BLOCK_RE.sub("", out)
+        self.check("forensic: dd -> acquire_image", "acquire_image $SRC $OUT" in user
+                   and not re.search(r"^\s*dd\s", user, re.MULTILINE))
+        self.check("forensic: dd conv/status kept as acquisition",
+                   acquired("dd if=/dev/sdb of=img.dd bs=1M conv=noerror,sync status=progress\n"))
+        self.check("forensic: partial read (count=) not rewritten", not acquired('dd if="$S" of=x.img count=10\n'))
+        self.check("forensic: dd from /dev/zero not rewritten", not acquired("dd if=/dev/zero of=pad.bin bs=1M\n"))
+        self.check("forensic: disk-to-disk not rewritten", not acquired("dd if=/dev/sdb of=/dev/sdc\n"))
+
     # -- execute elevated output, not just parse it ------------------------
     def runtime_suite(self) -> None:
         print("runtime:")
@@ -228,6 +246,8 @@ class Runner:
                                (out.stderr or parsed.stderr).strip()[-200:])
             self._arch_install_cases(tmp)
             self._behaviour_cases(tmp)
+            self._forensic_cases(tmp)
+            self._cis_cases(tmp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -369,6 +389,172 @@ class Runner:
         p = subprocess.run([sys.executable, os.path.join(ROOT, "apex.py"), "--no-banner", "elevate", src,
                             "-o", src, "--report", "-"], capture_output=True, text=True, timeout=120)
         self.check("-o <input> refused without --in-place", p.returncode == 1 and "--in-place" in p.stderr)
+
+    # dc3dd stand-in: copies if= to of= and writes a hashlog in dc3dd's format
+    # (CORRUPT=1 records a wrong source sha256)
+    _DC3DD = r'''#!/bin/bash
+echo "dc3dd $*" >> "$CALLS"
+[ "$*" = --version ] && { echo "dc3dd 7.2.646"; exit 0; }
+for a; do case $a in if=*) i=${a#if=};; of=*) o=${a#of=};; hlog=*) h=${a#hlog=};; log=*) l=${a#log=};; esac; done
+cat "$i" > "$o"; echo "0 bad sectors" > "$l"
+s256=$(sha256sum < "$i" | cut -d' ' -f1); [ -n "${CORRUPT:-}" ] && s256=$(echo x | sha256sum | cut -d' ' -f1)
+{ echo "command line: dc3dd $*"; echo "   $s256 (sha256)"; echo "   $(sha512sum < "$i" | cut -d' ' -f1) (sha512)"; } > "$h"
+'''
+    _GPG = r'''#!/bin/bash
+echo "gpg $*" >> "$CALLS"
+case " $* " in
+  *" --list-secret-keys "*) [ -z "${NOKEY:-}" ]; exit ;;
+  *" --fingerprint "*) echo "fpr:::::::::ABCDEF0123:"; exit 0 ;;
+esac
+for ((i = 1; i <= $#; i++)); do [ "${!i}" = --output ] && { j=$((i + 1)); echo sig > "${!j}"; }; done
+exit 0
+'''
+
+    def _forensic_cases(self, tmp: str) -> None:
+        """Run an elevated acquisition against a real (loop) block device with dc3dd
+        and gpg stubbed: one verified read, sealed manifests, hard fail on mismatch."""
+        if os.geteuid() != 0 or not shutil.which("losetup") or not shutil.which("blockdev"):
+            print("  (forensic runtime skipped: needs root, losetup and blockdev)")
+            return
+        work = tempfile.mkdtemp(prefix="forensic.", dir=tmp)
+        disk = os.path.join(work, "disk.raw")
+        with open(disk, "wb") as fh:
+            fh.write(os.urandom(3 << 20))
+        att = subprocess.run(["losetup", "-f", "--show", disk], capture_output=True, text=True)
+        if att.returncode != 0:
+            print("  (forensic runtime skipped: cannot attach a loop device)")
+            return
+        loop = att.stdout.strip()
+        try:
+            bindir = os.path.join(work, "bin")
+            os.makedirs(bindir)
+            for name, body in (("dc3dd", self._DC3DD), ("gpg", self._GPG),
+                               ("dd", '#!/bin/bash\necho "dd $*" >> "$CALLS"\nexec /bin/dd "$@"\n')):
+                path = os.path.join(bindir, name)
+                with open(path, "w") as fh:
+                    fh.write(body)
+                os.chmod(path, 0o755)
+            src = open(os.path.join(EX_DIR, "acquire.sh"), encoding="utf-8").read()
+            f = _RUBRICS["forensic"]
+            scripts = {"plain": det.elevate(src, f, "shell").elevated,
+                       "exit0": det.elevate(src.replace('$SRC"', '$SRC"; exit 0'), f, "shell").elevated}
+
+            def run(case: str, script: str, **extra):
+                subprocess.run(["blockdev", "--setrw", loop])
+                ev = os.path.join(work, case)
+                os.makedirs(ev)
+                path = os.path.join(work, case + ".sh")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(scripts[script])
+                calls = os.path.join(work, case + ".calls")
+                open(calls, "w").close()
+                env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"], CALLS=calls,
+                           COC_LOG=os.path.join(work, case + ".coc"), EXAMINER="e", EXAMINER_ORG="o",
+                           EXAMINER_CREDS="c", EVIDENCE_ID="EV1", CASE_NUMBER="C1", LOCATION="l",
+                           PURPOSE="p", SOURCE_DESC="d", GPG_KEY="k", **extra)
+                p = subprocess.run(["bash", path, loop, os.path.join(ev, "a.img")], env=env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+                return p, ev, open(calls).read(), open(env["COC_LOG"], errors="replace").read()
+
+            p, ev, calls, coc = run("ok", "plain")
+            images = calls.count("dc3dd if=")
+            self.check("forensic: one dc3dd read, no bare dd", p.returncode == 0 and images == 1
+                       and not re.search(r"^dd ", calls, re.MULTILINE), p.stderr[-300:])
+            ro = subprocess.run(["blockdev", "--getro", loop], capture_output=True, text=True).stdout.strip()
+            self.check("forensic: source left read-only", ro == "1")
+            tars = [n for n in os.listdir(ev) if n.endswith(".tar")]
+            sums = subprocess.run("sha256sum -c *.SHA256SUMS && sha512sum -c *.SHA512SUMS", shell=True,
+                                  cwd=ev, capture_output=True, text=True)
+            members = subprocess.run(["tar", "-tf", tars[0]], cwd=ev, capture_output=True,
+                                     text=True).stdout.split() if tars else []
+            self.check("forensic: sealed manifests verify", len(tars) == 1 and sums.returncode == 0
+                       and "a.img: OK" in sums.stdout and os.path.exists(os.path.join(ev, tars[0] + ".asc")),
+                       sums.stdout[-200:] + sums.stderr[-200:])
+            self.check("forensic: seal does not copy the image", members and "a.img" not in members, str(members))
+            self.check("forensic: openssl version recorded",
+                       re.search(r"TOOL    openssl = OpenSSL", coc) is not None or not shutil.which("openssl"))
+
+            p, ev, calls, coc = run("mismatch", "plain", CORRUPT="1")
+            self.check("forensic: hash mismatch -> fatal, not sealed", p.returncode != 0
+                       and "sha256 MISMATCH" in coc and not any(n.endswith(".tar") for n in os.listdir(ev)))
+
+            p, ev, calls, coc = run("exit0", "exit0")
+            self.check("forensic: script ending in `exit 0` is still sealed", p.returncode == 0
+                       and calls.count("--detach-sign") == 1, p.stderr[-300:])
+
+            p, ev, calls, coc = run("nokey", "plain", NOKEY="1")
+            self.check("forensic: missing signing key fails before imaging",
+                       p.returncode != 0 and "dc3dd if=" not in calls)
+
+            p, ev, calls, coc = run("overlap", "plain", WIPE_TARGET="1", SOURCE_DEV=loop, TARGET_DEV=loop)
+            self.check("forensic: wipe refuses target == source", p.returncode != 0
+                       and "overlaps source" in coc and "dc3dd if=" not in calls)
+        finally:
+            subprocess.run(["blockdev", "--setrw", loop])
+            subprocess.run(["losetup", "-d", loop])
+
+    def _cis_cases(self, tmp: str) -> None:
+        """Run CIS blocks against a scratch /etc with system commands stubbed."""
+        root = tempfile.mkdtemp(prefix="cis.", dir=tmp)
+        bindir = os.path.join(root, "bin")
+        os.makedirs(bindir)
+        calls = os.path.join(root, "calls")
+        for name in ("sshd", "systemctl", "apt-get", "augenrules"):
+            path = os.path.join(bindir, name)
+            with open(path, "w") as fh:
+                fh.write('#!/bin/bash\necho "{0} $*" >> "$CALLS"\n{1}'.format(
+                    name, "exit ${SSHD_RC:-0}\n" if name == "sshd" else ""))
+            os.chmod(path, 0o755)
+        etc = os.path.join(root, "etc")
+        files = {
+            "os-release": 'ID=debian\nVERSION="12 (bookworm)"\n',
+            "ssh/sshd_config": "PasswordAuthentication yes\n",
+            "chrony/chrony.conf": ("pool ntp.ubuntu.com        iburst maxsources 4\n"
+                                   "server time.cloudflare.com iburst nts\n"),
+            "pam.d/common-password": "password [success=1 default=ignore] pam_unix.so obscure yescrypt\n",
+            "pam.d/common-auth": "auth required pam_unix.so\n",
+        }
+        for rel, body in files.items():
+            os.makedirs(os.path.dirname(os.path.join(etc, rel)), exist_ok=True)
+            with open(os.path.join(etc, rel), "w") as fh:
+                fh.write(body)
+        blocks = {t.id: t.implementation.replace("/etc/", etc + "/").replace("/var/", root + "/var/")
+                  for t in _RUBRICS["cis_hardening"].transforms}
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"], CALLS=calls)
+
+        def run(code: str, **extra):
+            return subprocess.run(["bash", "-c", code], env=dict(env, **extra), stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=60)
+
+        p = run(blocks["DT-SSHD-DROPIN"] + "\nfalse\necho USER-CODE-RAN\n")
+        self.check("cis: sshd block does not leak set -e", "USER-CODE-RAN" in p.stdout, p.stderr[-200:])
+        dropin = os.path.join(etc, "ssh/sshd_config.d/00-stig.conf")
+        p = run(blocks["DT-SSHD-DROPIN"] + "\necho USER-CODE-RAN\n", SSHD_RC="1")
+        self.check("cis: rejected sshd drop-in removed, script continues",
+                   not os.path.exists(dropin) and "USER-CODE-RAN" in p.stdout and "sshd -t" in p.stderr)
+        shutil.move(os.path.join(etc, "ssh"), os.path.join(etc, "ssh.off"))
+        p = run(blocks["DT-SSHD-DROPIN"] + "\necho USER-CODE-RAN\n")
+        shutil.move(os.path.join(etc, "ssh.off"), os.path.join(etc, "ssh"))
+        self.check("cis: no sshd installed -> skipped", p.returncode == 0 and "USER-CODE-RAN" in p.stdout)
+
+        run(blocks["DT-CHRONY"] + "\n" + blocks["DT-CHRONY"])
+        conf = open(os.path.join(etc, "chrony/chrony.conf")).read().splitlines()
+        self.check("cis: chrony keeps source options, idempotent",
+                   conf[:2] == ["pool ntp.ubuntu.com maxsources 4 iburst maxpoll 16",
+                                "server time.cloudflare.com nts iburst maxpoll 16"]
+                   and conf.count("port 0") == 1 and "systemctl restart chrony" in open(calls).read(), str(conf))
+
+        p = run(blocks["DT-PAM-STACK"] + '\necho "VERSION=$VERSION"\n', VERSION="myapp-1.0")
+        self.check("cis: PAM on Debian edits common-password, keeps VERSION",
+                   "VERSION=myapp-1.0" in p.stdout and "system-auth" not in p.stderr
+                   and "remember=24" in open(os.path.join(etc, "pam.d/common-password")).read(), p.stderr[-200:])
+
+        finalize = os.path.join(etc, "audit/rules.d/99-finalize.rules")
+        run(blocks["DT-AUDIT-RULES"])
+        mutable = not os.path.exists(finalize)
+        run(blocks["DT-AUDIT-RULES"], AUDIT_IMMUTABLE="1")
+        self.check("cis: audit -e 2 only with AUDIT_IMMUTABLE=1",
+                   mutable and os.path.exists(finalize) and open(finalize).read() == "-e 2\n")
 
     def run(self) -> int:
         self.golden_suite()
