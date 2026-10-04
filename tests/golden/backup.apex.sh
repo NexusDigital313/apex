@@ -9,7 +9,7 @@ set -Eeuo pipefail
 
 # --- program metadata ---------------------------------------------------
 PROG="${0##*/}"
-VERSION="1.0.0"
+SCRIPT_VERSION="1.0.0"   # not VERSION: a caller's VERSION env var must survive
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
 # --- exit codes ---------------------------------------------------------
@@ -27,29 +27,30 @@ ASSUME_YES="${ASSUME_YES:-false}"
 _level_num(){ case "$1" in DEBUG) echo 10;; INFO) echo 20;; WARN) echo 30;; ERROR) echo 40;; *) echo 20;; esac; }
 log(){
   local level="$1"; shift
-  (( $(_level_num "$level") < $(_level_num "$LOG_LEVEL") )) && return 0
-  printf '%s [%s] %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$PROG" "$*" >&2
+  (( $(_level_num "$level") < $(_level_num "${LOG_LEVEL:-INFO}") )) && return 0
+  printf '%s [%s] %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "${PROG:-${0##*/}}" "$*" >&2
 }
 die(){ local code="$1"; shift; log ERROR "$*"; exit "$code"; }
 
 # --- side-effect wrapper (honors --dry-run) -----------------------------
 run(){
-  if [[ "$DRY_RUN" == true ]]; then log INFO "DRY-RUN: $*"; return 0; fi
+  if [[ "${DRY_RUN:-false}" == true ]]; then log INFO "DRY-RUN: $*"; return 0; fi
   "$@"
 }
 
-# --- cleanup + traps ----------------------------------------------------
-cleanup(){
+# --- cleanup + traps (prefixed so a script's own cleanup() can't replace it)
+_apex_cleanup(){
   local rc=$?
   [[ -n "${TMPDIR_RUN:-}" && -d "${TMPDIR_RUN:-}" ]] && rm -rf -- "$TMPDIR_RUN"
-  [[ -n "${LOCKDIR:-}" && -d "${LOCKDIR:-}" ]] && rmdir -- "$LOCKDIR" 2>/dev/null || true
+  # release the lock only if this process holds it
+  [[ -n "${LOCKDIR:-}" && "$(cat -- "${LOCKDIR}/pid" 2>/dev/null)" == "$$" ]] && rm -rf -- "$LOCKDIR" || true
   return $rc
 }
 err_trap(){ local line="$1" code="$2"; log ERROR "failed at line ${line} (exit ${code})"; }
 on_signal(){ local sig="$1"; log WARN "received SIG${sig}; aborting"; exit $((128 + $(kill -l "$sig") )); }
 
 trap 'err_trap "${LINENO}" "$?"' ERR
-trap cleanup EXIT
+trap _apex_cleanup EXIT
 trap 'on_signal INT'  INT
 trap 'on_signal TERM' TERM
 trap 'on_signal HUP'  HUP
@@ -65,7 +66,6 @@ Usage: PROG [OPTIONS] [ARGS...]
 Options:
   -h, --help        Show this help and exit
       --version     Print version and exit
-  -n, --dry-run     Show actions without performing them
   -y, --yes         Approve destructive operations without prompting
   -v, --verbose     Enable debug logging
   -q, --quiet       Only log warnings and errors
@@ -79,8 +79,7 @@ POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)    usage; exit 0 ;;
-    --version)    printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
-    -n|--dry-run) DRY_RUN=true; shift ;;
+    --version)    printf '%s %s\n' "${PROG:-${0##*/}}" "${SCRIPT_VERSION:-unknown}"; exit 0 ;;
     -y|--yes)     ASSUME_YES=true; shift ;;
     -v|--verbose) VERBOSE=true; LOG_LEVEL="DEBUG"; shift ;;
     -q|--quiet)   LOG_LEVEL="WARN"; shift ;;
@@ -112,7 +111,7 @@ confirm(){
 safe_rm(){
   local target="${1:?safe_rm: target required}"
   case "$target" in
-    ""|/|/\*|"$HOME"|"$HOME/") die "${E_USAGE:-2}" "refusing to remove unsafe path: '$target'" ;;
+    ""|/|/\*|"${HOME:-}"|"${HOME:-}/") die "${E_USAGE:-2}" "refusing to remove unsafe path: '$target'" ;;
   esac
   if [[ "${DRY_RUN:-false}" == true ]]; then log INFO "DRY-RUN: rm -rf -- $target"; return 0; fi
   confirm "remove '$target' recursively?" || { log WARN "skipped: $target"; return 0; }

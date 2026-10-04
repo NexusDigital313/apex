@@ -4,7 +4,7 @@
 # >>> APEX[FLAG_PLUMBING] Resolve mode and the --assume-yes/--interactive/--dry-run/--family flags into single variables, with mutual-exclusion errors, TTY auto-detect, and a documented exit-code table. Satisfies PROV-001, PROV-006, PROV-012, PROV-024. >>>
 set -Eeuo pipefail
 # Exit codes: 0 ok | 2 usage | 3 preflight | 4 user-abort | 5 validation | 6 destroy-guard | 10 install-fail
-MODE="" ; ASSUME_YES=0 ; DRY_RUN=0 ; REST=() ; FAMILY="${FAMILY:-auto}" ; CONFIG=""
+MODE="" ; ASSUME_YES="${ASSUME_YES:-0}" ; DRY_RUN="${DRY_RUN:-0}" ; REST=() ; FAMILY="${FAMILY:-auto}" ; CONFIG=""
 ERR_USAGE=2; ERR_PREFLIGHT=3; ERR_ABORT=4; ERR_VALIDATE=5; ERR_DESTROY=6; ERR_INSTALL=10
 usage(){ cat <<EOF
 Usage: $0 [--interactive|--unattended] [--assume-yes] [--dry-run] --family <rhel|debian|ubuntu|arch|suse|cloud-init|auto> [--config FILE]
@@ -25,7 +25,9 @@ set -- ${REST[@]+"${REST[@]}"}
 if [ -z "$MODE" ]; then if [ -t 0 ] && [ -t 1 ]; then MODE=interactive; else MODE=unattended; fi; fi
 # conflict + safety guards
 if [ "$MODE" = interactive ] && [ "$ASSUME_YES" = 1 ]; then echo "--interactive conflicts with --assume-yes" >&2; exit "$ERR_USAGE"; fi
-if [ "$MODE" = unattended ] && [ "$ASSUME_YES" != 1 ] && [ "$DRY_RUN" != 1 ]; then echo "unattended mode requires --assume-yes (or --dry-run)" >&2; exit "$ERR_USAGE"; fi
+# --dry-run is not approval: it only covers commands routed through run(), not the script's own
+if [ "$MODE" = unattended ] && [ "$ASSUME_YES" != 1 ]; then echo "unattended mode requires --assume-yes" >&2; exit "$ERR_USAGE"; fi
+if [ "$DRY_RUN" = 1 ]; then echo "note: --dry-run simulates only commands routed through run(); anything else still runs" >&2; fi
 # <<< APEX[FLAG_PLUMBING] <<<
 
 # >>> APEX[LOGGING] Timestamped/leveled log helpers teed to a persistent file, a die() that exits with a code, and an ERR/EXIT trap that reports the failing line and runs ordered cleanup (reverse unmount + crypt close). Satisfies PROV-011, PROV-012. >>>
@@ -102,7 +104,7 @@ confirm_destroy(){ local dev="$1"; [ -n "$dev" ] || die "confirm_destroy: empty 
 # <<< APEX[CONFIRM_DESTROY_GUARD] <<<
 
 # >>> APEX[WHIPTAIL_MENU_SKELETON] Reusable whiptail TUI helpers (menu/input/password/yesno) with a disk picker fed from candidate_disks, per-field validation loops, and a final plan-review screen that triggers confirm_destroy. dialog fallback. Satisfies PROV-023, PROV-015. >>>
-TUI=${TUI:-whiptail}; command -v whiptail >/dev/null || TUI=dialog; command -v "$TUI" >/dev/null || die "no whiptail/dialog for interactive mode" "$ERR_USAGE"
+TUI=${TUI:-whiptail}; command -v whiptail >/dev/null || TUI=dialog; [ "${MODE:-}" != interactive ] || command -v "$TUI" >/dev/null || die "no whiptail/dialog for interactive mode" "$ERR_USAGE"
 tui_input(){ local t="$1" p="$2" def="$3" v; v=$($TUI --title "$t" --inputbox "$p" 10 70 "$def" 3>&1 1>&2 2>&3) || exit "$ERR_ABORT"; printf '%s' "$v"; }
 tui_pass(){ local t="$1" v; v=$($TUI --title "$t" --passwordbox "$2" 10 70 3>&1 1>&2 2>&3) || exit "$ERR_ABORT"; printf '%s' "$v"; }
 tui_yesno(){ $TUI --title "$1" --yesno "$2" 18 72; }
@@ -110,7 +112,7 @@ pick_disk(){ local opts=(); while read -r d; do opts+=("$d" "$(lsblk -dno SIZE,M
   [ "${#opts[@]}" -gt 0 ] || die "no selectable disks" "$ERR_PREFLIGHT"
   $TUI --title 'Target disk' --menu 'Choose install disk (DESTROYED):' 20 76 8 "${opts[@]}" 3>&1 1>&2 2>&3 || exit "$ERR_ABORT"; }
 prompt_until_valid(){ local title="$1" prompt="$2" def="$3" validator="$4" v
-  while :; do v=$(tui_input "$title" "$prompt" "$def"); if "$validator" "$v"; then printf '%s' "$v"; return; fi; $TUI --msgbox "Invalid: $v" 8 50; done; }
+  while :; do v=$(tui_input "$title" "$prompt" "$def") || exit "$ERR_ABORT"; if "$validator" "$v"; then printf '%s' "$v"; return; fi; $TUI --msgbox "Invalid: $v" 8 50; done; }
 review_and_confirm(){ tui_yesno 'Confirm plan' "$1" || exit "$ERR_ABORT"; confirm_destroy "$TARGET_DISK"; }
 # <<< APEX[WHIPTAIL_MENU_SKELETON] <<<
 
@@ -350,7 +352,7 @@ runcmd:
 EOF
   printf 'instance-id: %s\nlocal-hostname: %s\n' "${TARGET_HOSTNAME}-$(date +%s)" "${TARGET_HOSTNAME}" > "$dir/meta-data"
   validate_config cloud-init "$dir/user-data"
-  command -v genisoimage >/dev/null && run genisoimage -output "$dir/seed.iso" -volid cidata -joliet -rock "$dir/user-data" "$dir/meta-data"; }
+  if command -v genisoimage >/dev/null; then run genisoimage -output "$dir/seed.iso" -volid cidata -joliet -rock "$dir/user-data" "$dir/meta-data"; fi; }
 # <<< APEX[CLOUDINIT_SCAFFOLD] <<<
 
 # >>> APEX[REPRODUCIBILITY_STAMP] Centralize inputs in one sourced config, normalize nondeterministic fields, and emit a config hash for diff-review and provenance. Satisfies PROV-014, PROV-024. >>>

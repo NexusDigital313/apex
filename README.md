@@ -87,7 +87,7 @@ apex list                        list domains and their apex standards
 
 ## What you get
 
-- the **elevated script** (executable, syntax-validated)
+- the **elevated script** (executable, syntax-validated — output that fails validation is never written)
 - an **elevation report** (`*.report.md`) — detected domain, target standard, the
   self-driving decision trace (applied / rewritten / already-present / not-needed / declined,
   with the reason for each), the full rubric control table, and references

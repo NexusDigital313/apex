@@ -2,7 +2,7 @@
 
 # ===== APEX elevation preamble :: DISA STIG (DoD/courtroom grade) for RHEL/Rocky/AlmaLinux 8 & 9 and Canonical Ubuntu 20.04/22.04 LTS, derived from the General Purpose OS SRG (GPOS-SRG). Maps to STIG IDs (RHEL-08-*, RHEL-09-*, UBTU-20-*, UBTU-22-*), legacy V-IDs, CCIs, and CAT I/II/III severity. =====
 # >>> APEX[DT-SSHD-DROPIN] Idempotently write a STIG sshd drop-in with FIPS ciphers/MACs/KEX and all session parameters, then validate and reload. On RHEL9 omit Ciphers/MACs/KEX (crypto-policy owns them) to avoid conflict. >>>
-set -e; D=/etc/ssh/sshd_config.d; F=$D/00-stig.conf; mkdir -p $D; { echo '# STIG-managed'; if ! grep -qiE 'rhel' /etc/os-release || grep -qiE 'release 8' /etc/redhat-release 2>/dev/null; then echo 'Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr'; echo 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256'; echo 'KexAlgorithms ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256'; fi; printf '%s\n' 'PermitRootLogin no' 'PermitEmptyPasswords no' 'PermitUserEnvironment no' 'ClientAliveInterval 600' 'ClientAliveCountMax 1' 'LoginGraceTime 60' 'MaxAuthTries 6' 'X11Forwarding no' 'IgnoreRhosts yes' 'HostbasedAuthentication no' 'StrictModes yes' 'GSSAPIAuthentication no' 'KerberosAuthentication no' 'Compression no' 'Banner /etc/issue.net'; } > $F; chmod 0600 $F; sshd -t && systemctl reload sshd 2>/dev/null || systemctl reload ssh; grep -q 'include' /etc/ssh/sshd_config 2>/dev/null || echo 'Include /etc/ssh/sshd_config.d/*.conf' | cat - /etc/ssh/sshd_config > /tmp/sc && mv /tmp/sc /etc/ssh/sshd_config
+set -e; D=/etc/ssh/sshd_config.d; F=$D/00-stig.conf; mkdir -p $D; { echo '# STIG-managed'; if ! grep -qiE 'rhel' /etc/os-release || grep -qiE 'release 8' /etc/redhat-release 2>/dev/null; then echo 'Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr'; echo 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256'; echo 'KexAlgorithms ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group14-sha256'; fi; printf '%s\n' 'PermitRootLogin no' 'PermitEmptyPasswords no' 'PermitUserEnvironment no' 'ClientAliveInterval 600' 'ClientAliveCountMax 1' 'LoginGraceTime 60' 'MaxAuthTries 6' 'X11Forwarding no' 'IgnoreRhosts yes' 'HostbasedAuthentication no' 'StrictModes yes' 'GSSAPIAuthentication no' 'KerberosAuthentication no' 'Compression no' 'Banner /etc/issue.net'; } > $F; chmod 0600 $F; grep -qiE '^[[:space:]]*Include[[:space:]].*sshd_config\.d' /etc/ssh/sshd_config 2>/dev/null || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config; if sshd -t; then systemctl reload sshd 2>/dev/null || systemctl reload ssh; else echo 'ERROR: sshd -t rejected the config; sshd NOT reloaded' >&2; exit 1; fi
 # <<< APEX[DT-SSHD-DROPIN] <<<
 
 # >>> APEX[DT-DOD-BANNER] Write the verbatim DoD Standard Mandatory Notice and Consent Banner to /etc/issue, /etc/issue.net. >>>
@@ -18,7 +18,7 @@ f=/etc/security/faillock.conf; [ -f "$f" ] || touch "$f"; set_kv(){ k=$1; v=$2; 
 # <<< APEX[DT-FAILLOCK-CONF] <<<
 
 # >>> APEX[DT-PAM-STACK] Ensure pwquality, pwhistory, and faillock modules are wired into the PAM stack distro-correctly (authselect on RHEL9, direct edit on RHEL8/Ubuntu). >>>
-. /etc/os-release; if [ "$ID" = ubuntu ]; then cp=/etc/pam.d/common-password; ca=/etc/pam.d/common-auth; grep -q pam_pwquality $cp || sed -ri '0,/pam_unix.so/s//pam_pwquality.so retry=3 enforce_for_root\n&/' $cp; grep -q 'remember=24' $cp || sed -ri 's/(pam_unix.so.*)/\1 remember=24/' $cp; grep -q pam_faillock $ca || { sed -ri '1ipassword-not-edited' $ca; }; else for sf in /etc/pam.d/system-auth /etc/pam.d/password-auth; do grep -q 'pam_pwhistory.so' $sf || sed -ri 's/^(password\s+(requisite|required)\s+pam_pwquality.so.*)/\1\npassword requisite pam_pwhistory.so use_authtok remember=24 retry=3/' $sf; done; fi
+. /etc/os-release; if [ "$ID" = ubuntu ]; then cp=/etc/pam.d/common-password; ca=/etc/pam.d/common-auth; grep -q pam_pwquality $cp || DEBIAN_FRONTEND=noninteractive apt-get -y install libpam-pwquality || echo 'WARN: libpam-pwquality not installed; pam_pwquality is not in common-password' >&2; grep -q 'remember=24' $cp || sed -ri 's/(pam_unix.so.*)/\1 remember=24/' $cp; grep -q pam_faillock $ca || echo 'WARN: pam_faillock is not in common-auth; add it with a pam-auth-update profile and test a login before logging out (not automated: a wrong auth stack locks everyone out)' >&2; else for sf in /etc/pam.d/system-auth /etc/pam.d/password-auth; do grep -q 'pam_pwhistory.so' $sf || sed -ri 's/^(password\s+(requisite|required)\s+pam_pwquality.so.*)/\1\npassword requisite pam_pwhistory.so use_authtok remember=24 retry=3/' $sf; done; fi
 # <<< APEX[DT-PAM-STACK] <<<
 
 # >>> APEX[DT-LOGINDEFS-AGING] Upsert password-aging, umask, and encrypt-method directives in /etc/login.defs and apply to existing interactive users. >>>
@@ -58,7 +58,7 @@ net.ipv6.conf.default.accept_source_route = 0
 net.ipv6.conf.all.accept_ra = 0
 net.ipv6.conf.default.accept_ra = 0
 EOF
-sysctl --system >/dev/null
+sysctl --system >/dev/null || echo 'WARN: some sysctl keys were not applied (not present on this kernel?)' >&2
 # <<< APEX[DT-SYSCTL] <<<
 
 # >>> APEX[DT-TMOUT-UMASK-PROFILE] Drop TMOUT and umask enforcement into /etc/profile.d (covers shells that don't read login.defs umask). >>>
@@ -70,7 +70,8 @@ printf '%s\n' 'TMOUT=600' 'readonly TMOUT' 'export TMOUT' > /etc/profile.d/99-st
 # <<< APEX[DT-CRYPTO-POLICY-FIPS] <<<
 
 # >>> APEX[DT-DCONF-BANNER] Configure GDM login banner + acknowledgement and screen lock via dconf, only when a graphical stack is present. >>>
-command -v dconf >/dev/null 2>&1 && [ -d /etc/dconf/db ] || exit 0; mkdir -p /etc/dconf/db/gdm.d /etc/dconf/db/local.d/locks; cat > /etc/dconf/db/gdm.d/01-stig <<'EOF'
+# skipped (not exited) on headless hosts: an `exit` here would end the whole script
+if command -v dconf >/dev/null 2>&1 && [ -d /etc/dconf/db ]; then mkdir -p /etc/dconf/db/gdm.d /etc/dconf/db/local.d/locks; cat > /etc/dconf/db/gdm.d/01-stig <<'EOF'
 [org/gnome/login-screen]
 banner-message-enable=true
 banner-message-text='You are accessing a U.S. Government (USG) Information System (IS) that is provided for USG-authorized use only. By using this IS you consent to monitoring, interception, search, and seizure as described in the full DoD notice.'
@@ -82,7 +83,7 @@ idle-delay=uint32 900
 lock-enabled=true
 lock-delay=uint32 0
 EOF
-printf '%s\n' '/org/gnome/desktop/session/idle-delay' '/org/gnome/desktop/screensaver/lock-enabled' '/org/gnome/desktop/screensaver/lock-delay' > /etc/dconf/db/local.d/locks/00-stig; dconf update
+printf '%s\n' '/org/gnome/desktop/session/idle-delay' '/org/gnome/desktop/screensaver/lock-enabled' '/org/gnome/desktop/screensaver/lock-delay' > /etc/dconf/db/local.d/locks/00-stig; dconf update; fi
 # <<< APEX[DT-DCONF-BANNER] <<<
 
 # >>> APEX[DT-REMOVE-PACKAGES] Remove STIG-prohibited packages distro-aware, only if installed. >>>
@@ -90,7 +91,7 @@ printf '%s\n' '/org/gnome/desktop/session/idle-delay' '/org/gnome/desktop/screen
 # <<< APEX[DT-REMOVE-PACKAGES] <<<
 
 # >>> APEX[DT-JOURNALD-LOGPERMS] Persist+compress journald and lock down audit log permissions. >>>
-f=/etc/systemd/journald.conf; up(){ k=$1;v=$2; if grep -qE "^\s*#?\s*${k}=" $f; then sed -ri "s|^\s*#?\s*${k}=.*|${k}=${v}|" $f; else echo "${k}=${v}" >> $f; fi; }; up Storage persistent; up Compress yes; up ForwardToSyslog yes; mkdir -p /var/log/journal; systemctl restart systemd-journald; a=/etc/audit/auditd.conf; au(){ k=$1;v=$2; sed -ri "s|^\s*#?\s*(${k})\s*=.*|\1 = ${v}|" $a || true; grep -qE "^\s*${k}\s*=" $a || echo "${k} = ${v}" >> $a; }; au log_file_mode 0600; au log_group root; au space_left_action email; au admin_space_left_action single; au disk_full_action HALT; au disk_error_action HALT; au max_log_file_action ROTATE; chmod 0600 /var/log/audit/audit.log 2>/dev/null; chmod 0700 /var/log/audit 2>/dev/null; systemctl restart auditd 2>/dev/null || service auditd restart 2>/dev/null || true
+f=/etc/systemd/journald.conf; up(){ k=$1;v=$2; if grep -qE "^\s*#?\s*${k}=" $f; then sed -ri "s|^\s*#?\s*${k}=.*|${k}=${v}|" $f; else echo "${k}=${v}" >> $f; fi; }; up Storage persistent; up Compress yes; up ForwardToSyslog yes; mkdir -p /var/log/journal; systemctl restart systemd-journald; a=/etc/audit/auditd.conf; if [ -f "$a" ]; then au(){ k=$1;v=$2; sed -ri "s|^\s*#?\s*(${k})\s*=.*|\1 = ${v}|" $a || true; grep -qE "^\s*${k}\s*=" $a || echo "${k} = ${v}" >> $a; }; au log_file_mode 0600; au log_group root; au space_left_action email; au admin_space_left_action single; au disk_full_action HALT; au disk_error_action HALT; au max_log_file_action ROTATE; chmod 0600 /var/log/audit/audit.log 2>/dev/null || true; chmod 0700 /var/log/audit 2>/dev/null || true; systemctl restart auditd 2>/dev/null || service auditd restart 2>/dev/null || true; else echo 'WARN: auditd not installed; audit log settings skipped' >&2; fi
 # <<< APEX[DT-JOURNALD-LOGPERMS] <<<
 # ===== end APEX preamble =====
 

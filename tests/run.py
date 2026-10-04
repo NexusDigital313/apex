@@ -321,6 +321,17 @@ class Runner:
         p = run_elevated('#!/bin/bash\nVERSION=2.1\nL="a b"\nfor x in $L; do echo "$x"; done\necho "$VERSION"\n')
         self.check("own VERSION + word splitting kept", p.stdout.split() == ["a", "b", "2.1"], p.stderr[-200:])
 
+        # the injected lock is released on exit, so the next run is not refused, and a
+        # script's own cleanup() does not replace APEX's EXIT handler
+        lock_src = ('#!/bin/bash\n# nightly cron job\ncleanup(){ echo "user cleanup ran" >&2; }\n'
+                    'rsync --version >/dev/null 2>&1 || true\necho ok\n')
+        runs = [run_elevated(lock_src, env={"TMPDIR": tmp}) for _ in range(2)]
+        self.check("lock released between runs",
+                   all(r.returncode == 0 and r.stdout.strip() == "ok" for r in runs)
+                   and not any(n.endswith(".lock") for n in os.listdir(tmp)), runs[-1].stderr[-200:])
+        self.check("own cleanup() does not hijack the EXIT trap",
+                   not any("user cleanup ran" in r.stderr for r in runs))
+
         # shebangs: POSIX sh upgraded with its flags, other shells left alone
         out = det.elevate('#!/bin/sh -e\nrm -rf "$X"\n', g, "shell").elevated.splitlines()
         self.check("#!/bin/sh -e -> bash + set -e", out[:2] == ["#!/usr/bin/env bash", "set -e"], str(out[:2]))

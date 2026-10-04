@@ -47,28 +47,14 @@ ro_loop(){ losetup --read-only --find --show "$1"; }
 ro_mount(){ mount -o ro,noload,noatime,nodev,noexec "$1" "$2"; }
 # <<< APEX[DT-RO-ENFORCE] <<<
 
-# >>> APEX[DT-DD-TO-DC3DD] Rewrite bare dd into dc3dd with dual inline hashing, error logging, and a separate hashlog — and capture the SOURCE pre-image hash in the same pass. Satisfies FOR-SOUND-IMAGER, FOR-HASHLOG-ERRLOG, FOR-PRE-HASH-SRC, FOR-DUAL-HASH (acquisition side), FOR-BADBLOCK, FOR-CMDLINE-RECORD. >>>
-# BEFORE:  dd if=$SOURCE_DEV of=$IMAGE bs=4M
-# AFTER (engine-injected):
-IMAGE="${IMAGE:?output image path}"
-[ -e "$IMAGE" ] && { _log "FATAL refuse to clobber $IMAGE"; exit 1; }
-dc3dd if="$SOURCE_DEV" of="$IMAGE" \
-  hash=sha256 hash=sha512 \
-  hashlog="${IMAGE}.hashlog" \
-  log="${IMAGE}.dc3dd.log" \
-  hashconv=after verb=on \
-  bs=4M 2>&1 | tee -a "$COC_LOG"
-# dc3dd computes the source-read hash inline -> that IS the pre-acquisition source hash
-awk '/sha256/||/sha512/' "${IMAGE}.hashlog" | tee -a "$COC_LOG"
-_log "PRE-HASH(source via dc3dd) recorded in ${IMAGE}.hashlog"
-# <<< APEX[DT-DD-TO-DC3DD] <<<
-
 # >>> APEX[DT-STERILE-TARGET] Wipe and verify the destination media sterile before imaging, proving no cross-contamination. Satisfies FOR-STERILE-TARGET. >>>
 if [ "${WIPE_TARGET:-0}" = 1 ]; then
   : "${TARGET_DEV:?target device to sterilize}"
   [ "$TARGET_DEV" != "$SOURCE_DEV" ] || { _log 'FATAL target==source'; exit 1; }
   _log "STERILIZE wiping $TARGET_DEV"
-  blkdiscard -f "$TARGET_DEV" 2>/dev/null || dd if=/dev/zero of="$TARGET_DEV" bs=4M status=progress
+  # zero-fill (plain discard does not guarantee zeroes); shred knows the device size,
+  # unlike dd, which always ends in ENOSPC and would trip the ERR trap
+  blkdiscard -f -z "$TARGET_DEV" 2>/dev/null || shred -n 0 -z "$TARGET_DEV"
   # verify sterile: hash a sample must equal hash of equivalent zeroes
   sample=$(dd if="$TARGET_DEV" bs=1M count=64 2>/dev/null | sha256sum | awk '{print $1}')
   zeros=$(dd if=/dev/zero bs=1M count=64 2>/dev/null | sha256sum | awk '{print $1}')
@@ -76,6 +62,22 @@ if [ "${WIPE_TARGET:-0}" = 1 ]; then
   _log 'STERILE: target verified zeroed'
 fi
 # <<< APEX[DT-STERILE-TARGET] <<<
+
+# >>> APEX[DT-DD-TO-DC3DD] Rewrite bare dd into dc3dd with dual inline hashing, error logging, and a separate hashlog — and capture the SOURCE pre-image hash in the same pass. Satisfies FOR-SOUND-IMAGER, FOR-HASHLOG-ERRLOG, FOR-PRE-HASH-SRC, FOR-DUAL-HASH (acquisition side), FOR-BADBLOCK, FOR-CMDLINE-RECORD. >>>
+# BEFORE:  dd if=$SOURCE_DEV of=$IMAGE bs=4M
+# AFTER (engine-injected):
+IMAGE="${IMAGE:?output image path}"
+[ -e "$IMAGE" ] && { _log "FATAL refuse to clobber $IMAGE"; exit 1; }
+dc3dd if="$SOURCE_DEV" of="$IMAGE" \
+  hash=sha256 hash=sha512 \
+  hlog="${IMAGE}.hashlog" \
+  log="${IMAGE}.dc3dd.log" \
+  verb=on \
+  bufsz=4M 2>&1 | tee -a "$COC_LOG"
+# dc3dd computes the source-read hash inline -> that IS the pre-acquisition source hash
+awk '/sha256/||/sha512/' "${IMAGE}.hashlog" | tee -a "$COC_LOG"
+_log "PRE-HASH(source via dc3dd) recorded in ${IMAGE}.hashlog"
+# <<< APEX[DT-DD-TO-DC3DD] <<<
 # ===== end APEX preamble =====
 
 # quick disk image
@@ -109,13 +111,16 @@ verify_dual "$IMAGE" "${IMAGE}.hashlog"
 # >>> APEX[DT-SEAL] Build the signed manifest, tar the evidence set, detach-sign with the examiner GPG key, and optionally apply an RFC 3161 trusted timestamp. Reachable ONLY after DT-DUAL-HASH-VERIFY passes. Satisfies FOR-MANIFEST, FOR-SEAL-SIGN, FOR-RFC3161-TSA, FOR-REPRO-STATEMENT. >>>
 : "${GPG_KEY:?examiner signing key id/fingerprint}"
 BUNDLE="${EVIDENCE_ID}_$(date -u +%Y%m%dT%H%M%SZ)"
+# seal a frozen copy of the COC log: xtrace and _log keep appending to the live one,
+# so hashing it here and tarring it later would never match
+SEALED_COC="${BUNDLE}.coc.log"; cp -- "$COC_LOG" "$SEALED_COC"
 # manifest: every artifact with dual hashes
 { echo "# evidence manifest $EVIDENCE_ID case $CASE_NUMBER examiner $EXAMINER";
-  for f in "$IMAGE"* "$COC_LOG"; do [ -f "$f" ] && printf '%s  %s  %s\n' "$(sha256sum "$f"|awk '{print $1}')" "$(sha512sum "$f"|awk '{print $1}')" "$f"; done; } > "${BUNDLE}.manifest"
+  for f in "$IMAGE"* "$SEALED_COC"; do [ -f "$f" ] && printf '%s  %s  %s\n' "$(sha256sum "$f"|awk '{print $1}')" "$(sha512sum "$f"|awk '{print $1}')" "$f"; done; } > "${BUNDLE}.manifest"
 # reproducibility statement
 { echo 'REPRODUCE: sha256sum -c and sha512sum -c the manifest; gpg --verify the .asc; dc3dd/ewfverify versions in COC log.';
   echo "verify_cmd: gpg --verify ${BUNDLE}.tar.asc ${BUNDLE}.tar && sha256sum -c <(awk '{print \$1\"  \"\$3}' ${BUNDLE}.manifest)"; } > "${BUNDLE}.reproduce.txt"
-tar --sort=name --owner=0 --group=0 -cf "${BUNDLE}.tar" "${BUNDLE}.manifest" "${BUNDLE}.reproduce.txt" "$IMAGE"* "$COC_LOG"
+tar --sort=name --owner=0 --group=0 -cf "${BUNDLE}.tar" "${BUNDLE}.manifest" "${BUNDLE}.reproduce.txt" "$IMAGE"* "$SEALED_COC"
 gpg --batch --yes --local-user "$GPG_KEY" --armor --detach-sign --output "${BUNDLE}.tar.asc" "${BUNDLE}.tar" || _fatal
 _log "SEALED ${BUNDLE}.tar signed-by $(gpg --fingerprint "$GPG_KEY" 2>/dev/null | sed -n 2p | tr -d ' ')"
 if [ "${TSA_URL:-}" != "" ]; then
