@@ -159,6 +159,20 @@ class Runner:
         self.check("heredoc body preserved", body_has(hd, "rm -rf /tmp/x"))
         self.check("real code beside heredoc rewritten", body_has(hd, 'safe_rm "$REAL"'))
 
+        # heredoc forms the lexer must recognise, and prose that must not flip quoting
+        self.check("<<\\EOF body preserved", body_has('cat <<\\EOF\nrm -rf /tmp/x\nEOF\n', "rm -rf /tmp/x"))
+        self.check("<<'EOF' body preserved", body_has("cat <<'EOF'\nrm -rf /tmp/x\nEOF\n", "rm -rf /tmp/x"))
+        self.check("indented non-terminator kept in body",
+                   body_has('cat <<EOF\n  EOF\nrm -rf /tmp/x\nEOF\n', "rm -rf /tmp/x"))
+        self.check("apostrophe in heredoc keeps later '' literal",
+                   body_has("cat <<EOF\ndon't\nEOF\necho 'rm -rf /tmp/x'\n", "echo 'rm -rf /tmp/x'"))
+        self.check("$'\\'' keeps later '' literal",
+                   body_has("echo $'it\\'s'\necho 'rm -rf /tmp/x'\n", "echo 'rm -rf /tmp/x'"))
+        self.check("here-string is not a heredoc", rewrote('cat <<<foo\nrm -rf "$X"\n'))
+        self.check("arithmetic << is not a heredoc", rewrote('x=$((1<<2))\nrm -rf "$X"\n'))
+        self.check("rm -rf mid-line not rewritten",
+                   not rewrote("echo 'a' rm -rf /tmp/x\n") and not rewrote("true; rm -rf a 'b c'\n"))
+
         # multi-line double-quoted string body must be preserved
         ml = 'M="danger:\nrm -rf /\nend"\n'
         self.check("multiline-string body preserved", body_has(ml, "rm -rf /"))
@@ -198,7 +212,7 @@ class Runner:
                 start = impl.index("  arch-chroot /mnt")
             end = impl.index("\nCHROOT", start) + len("\nCHROOT")
             snippet = impl[start:end].replace("arch-chroot /mnt /bin/bash -euo pipefail <<CHROOT", "cat <<CHROOT")
-            harness = ("blkid(){ echo 1111-AAAA; }; openssl(){ echo HASH; }\n"
+            harness = ("blkid(){ echo 1111-AAAA; }; openssl(){ cat >/dev/null; echo HASH; }\n"
                        "f(){ local disk=/dev/sda vg=vg0 hooks=x\n" + snippet + "\n}\nf\n")
             for fw in ("uefi", "bios"):
                 for enc in ("0", "1"):
@@ -232,7 +246,7 @@ class Runner:
                                               "CONFIRM_DESTROY_GUARD", "LUKS_PARTITION_FLOW",
                                               "ARCH_INSTALLER_SCAFFOLD")).replace("/mnt", mnt)
         stubs = "".join('{0}(){{ echo "{0} $*" >> "$CALLS"; {1}}}\n'.format(
-            s, "echo 1111-AAAA; " if s == "blkid" else "echo HASH; " if s == "openssl" else "")
+            s, "echo 1111-AAAA; " if s == "blkid" else "cat >/dev/null; echo HASH; " if s == "openssl" else "")
             for s in self._STUBS)
         stubs += ('cryptsetup(){ echo "cryptsetup $*" >> "$CALLS"; cat >/dev/null; }\n'
                   'genfstab(){ echo "genfstab $*" >> "$CALLS"; }\n'
@@ -329,6 +343,21 @@ class Runner:
         self.check("--in-place backup is byte-exact", bak == raw, p.stderr[-200:])
         self.check("--in-place keeps non-UTF-8 bytes", b"caf\xe9" in open(src, "rb").read())
         self.check("--in-place keeps mode 700", (os.stat(src).st_mode & 0o777) == 0o700)
+
+        # output that fails validation is never written, so --in-place can't break a script
+        bad = os.path.join(tmp, "broken.sh")
+        raw = b'#!/bin/bash\nif true; then\nrm -rf "$X"\n'
+        with open(bad, "wb") as fh:
+            fh.write(raw)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "apex.py"), "--no-banner", "elevate", bad,
+                            "--in-place", "--report", "-"], capture_output=True, text=True, timeout=120)
+        self.check("invalid result -> exit 1, input untouched",
+                   p.returncode == 1 and open(bad, "rb").read() == raw, p.stderr[-200:])
+
+        # -o pointing at the input needs --in-place (which keeps a backup)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "apex.py"), "--no-banner", "elevate", src,
+                            "-o", src, "--report", "-"], capture_output=True, text=True, timeout=120)
+        self.check("-o <input> refused without --in-place", p.returncode == 1 and "--in-place" in p.stderr)
 
     def run(self) -> int:
         self.golden_suite()

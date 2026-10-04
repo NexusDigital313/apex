@@ -15,8 +15,9 @@ Four guards keep this safe and repeatable:
   2. Self-driving gate: each transform/rewrite carries an `apply_when`
      condition; it fires only when the script's content shows it is needed.
   3. Region protection: rewrites are applied only to real user code —
-     APEX-injected blocks and heredoc bodies are skipped (see _protected_spans),
-     so the engine never edits generated code or here-document text.
+     APEX-injected blocks, heredoc bodies, comments and quoted strings are
+     skipped (see _protected_spans), so the engine never edits generated code
+     or text the script prints or writes.
   4. Validate-and-rollback: every rewrite is parsed (bash -n + shellcheck) as
      part of the whole script; any rewrite that would break it is reverted and
      reported as "declined" rather than emitted.
@@ -24,6 +25,7 @@ Four guards keep this safe and repeatable:
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
@@ -103,49 +105,94 @@ def _bash_shebang(shebang: str) -> Optional[str]:
     return DEFAULT_SHEBANG + ("\nset " + " ".join(flags) if flags else "")
 
 
-# Heredoc opener: `<< WORD`, `<<-WORD`, `<< "WORD"`, `<< 'WORD'`. The `\w+`
-# after the optional quote means `<<<` (here-string) is NOT matched — it has no
-# body to protect. This is the first brick of the lexer: rewrites must not touch
-# text inside a heredoc body (it parses fine, so rollback can't catch a mistake).
-_HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)(?P<delim>\w+)\1")
+# Characters that end an unquoted shell word (a heredoc delimiter, here).
+_WORD_END = " \t\n;&|<>()"
 
 
-def _heredoc_spans(text: str) -> List[Tuple[int, int]]:
-    """(start, end) spans covering each heredoc BODY (delimiter line included)."""
-    spans: List[Tuple[int, int]] = []
-    for m in _HEREDOC_START_RE.finditer(text):
-        nl = text.find("\n", m.end())
-        if nl == -1:
-            continue
-        body_start = nl + 1
-        term = re.compile(r"^[ \t]*" + re.escape(m.group("delim")) + r"[ \t]*$", re.MULTILINE)
-        tm = term.search(text, body_start)
-        spans.append((body_start, tm.end() if tm else len(text)))
-    return spans
+def _heredoc_word(text: str, i: int) -> Tuple[str, int]:
+    """Parse the heredoc delimiter word starting at `i`.
+
+    Returns (delimiter with quoting removed, index after the word). Handles
+    `EOF`, `'EOF'`, `"EOF"`, `\\EOF` and mixed forms such as `E"O"F`.
+    """
+    n = len(text)
+    word: List[str] = []
+    while i < n and text[i] not in _WORD_END:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            word.append(text[i + 1])
+            i += 2
+        elif ch in "'\"":
+            j = text.find(ch, i + 1)
+            if j == -1 or "\n" in text[i + 1:j]:
+                break
+            word.append(text[i + 1:j])
+            i = j + 1
+        else:
+            word.append(ch)
+            i += 1
+    return "".join(word), i
 
 
-def _lex_spans(text: str) -> List[Tuple[int, int]]:
+def _heredoc_body_end(text: str, start: int, delim: str, strip_tabs: bool) -> int:
+    """End of the body that starts at `start` (terminator line included).
+
+    Matches bash exactly: the terminator is the delimiter alone on its line,
+    with leading TABs allowed only for `<<-`. Unterminated -> end of text.
+    """
+    pos, n = start, len(text)
+    while pos < n:
+        nl = text.find("\n", pos)
+        end = n if nl == -1 else nl
+        line = text[pos:end]
+        if (line.lstrip("\t") if strip_tabs else line) == delim:
+            return end
+        pos = end + 1
+    return n
+
+
+def _lex_spans(text: str, skip: Optional[List[Tuple[int, int]]] = None) -> List[Tuple[int, int]]:
     """Thin shell lexer: spans a rewrite must never touch.
 
     A single left-to-right scan (honouring backslash escapes) that protects:
       - comments        `# …` to end of line (only at a token boundary, so
                         `${#arr}` / `$#` are not mistaken for a comment);
       - single-quoted   '…' — always (content is literal, e.g. a `\\`backtick\\``
-                        inside '…' must stay literal);
+                        inside '…' must stay literal); `$'…'` honours `\\'`;
       - double-quoted   "…" — only when it spans a newline (a multi-line string
                         whose inner lines can masquerade as commands). Single-line
-                        "$var" arguments stay live so real code is still rewritten.
+                        "$var" arguments stay live so real code is still rewritten;
+      - heredoc bodies  for every `<<WORD` / `<<-WORD` / `<<'WORD'` / `<<\\WORD`
+                        opener, the body from the next line through the
+                        terminator. Bodies are skipped, not lexed, so an
+                        apostrophe in prose (`don't`) cannot flip the quote
+                        state of the code that follows.
 
-    Not a full parser — nested `$( )` and the `'\\''` idiom are left to the
-    validate-and-rollback backstop — but it closes the cases where a rewrite
-    would otherwise parse cleanly yet corrupt string/comment text.
+    `skip` spans (APEX's own blocks) are jumped over unscanned.
+
+    Not a full parser — nested `$( )` is left to the validate-and-rollback
+    backstop — but it closes the cases where a rewrite would otherwise parse
+    cleanly yet corrupt string/comment text.
     """
     spans: List[Tuple[int, int]] = []
+    skip_at = {s: e for s, e in (skip or [])}
+    pending: List[Tuple[str, bool]] = []  # heredocs opened on the current line
     i, n = 0, len(text)
     while i < n:
+        if i in skip_at:
+            i = max(skip_at[i], i + 1)
+            continue
         ch = text[i]
         if ch == "\\":
             i += 2
+            continue
+        if ch == "\n":
+            i += 1
+            for delim, strip_tabs in pending:
+                end = _heredoc_body_end(text, i, delim, strip_tabs)
+                spans.append((i, end))
+                i = end + 1
+            pending = []
             continue
         if ch == "#":
             prev = text[i - 1] if i > 0 else "\n"
@@ -157,9 +204,28 @@ def _lex_spans(text: str) -> List[Tuple[int, int]]:
                 continue
             i += 1
             continue
+        if ch == "<" and text.startswith("<<", i):
+            if text.startswith("<<<", i):  # here-string: no body
+                i += 3
+                continue
+            j = i + 2
+            strip_tabs = text.startswith("-", j)
+            if strip_tabs:
+                j += 1
+            while j < n and text[j] in " \t":
+                j += 1
+            delim, j = _heredoc_word(text, j)
+            # `$(( x << 2 ))` is a shift, not a heredoc
+            if delim and not delim.isdigit():
+                pending.append((delim, strip_tabs))
+            i = max(j, i + 2)
+            continue
         if ch == "'":
-            j = text.find("'", i + 1)
-            j = n if j == -1 else j + 1
+            ansi_c = i > 0 and text[i - 1] == "$"
+            j = i + 1
+            while j < n and text[j] != "'":
+                j += 2 if (ansi_c and text[j] == "\\") else 1
+            j = n if j >= n else j + 1
             spans.append((i, j))
             i = j
             continue
@@ -182,16 +248,12 @@ def _lex_spans(text: str) -> List[Tuple[int, int]]:
 
 
 def _protected_spans(text: str) -> List[Tuple[int, int]]:
-    """(start, end) regions never rewritten: APEX blocks/headers, heredoc bodies,
-    and the comment / single-quoted / multi-line-string spans from the lexer.
-
-    Overlapping spans are coalesced so the segment walk in _sub_user_regions
-    stays correct.
-    """
-    spans = [(m.start(), m.end()) for m in _APEX_BLOCK_RE.finditer(text)]
-    spans += [(m.start(), m.end()) for m in _APEX_HEADER_RE.finditer(text)]
-    spans += _heredoc_spans(text)
-    spans += _lex_spans(text)
+    """(start, end) regions never rewritten: APEX blocks/headers, plus the
+    comment / single-quoted / multi-line-string / heredoc-body spans from the
+    lexer. Sorted and coalesced."""
+    apex = [(m.start(), m.end()) for m in _APEX_BLOCK_RE.finditer(text)]
+    apex += [(m.start(), m.end()) for m in _APEX_HEADER_RE.finditer(text)]
+    spans = apex + _lex_spans(text, skip=apex)
     spans.sort()
     merged: List[Tuple[int, int]] = []
     for s, e in spans:
@@ -203,22 +265,29 @@ def _protected_spans(text: str) -> List[Tuple[int, int]]:
 
 
 def _sub_user_regions(text: str, rx, repl: str) -> Tuple[str, int]:
-    """Apply rx->repl only to the user's code, skipping APEX-injected spans.
+    """Apply rx->repl only to the user's code, skipping protected spans.
 
-    Keeps rewrites off APEX's own blocks (e.g. the `rm -rf` inside a generated
-    safe_rm/cleanup trap), which is what makes a re-run a true no-op.
+    Matching runs over the WHOLE text, so `^`/`$` mean real line boundaries
+    (not the edge of a code segment between two strings); any match that
+    touches a protected span is left alone. Keeps rewrites off APEX's own
+    blocks (e.g. the `rm -rf` inside a generated safe_rm), which is what makes
+    a re-run a true no-op, and off string/comment/heredoc text.
     """
+    spans = _protected_spans(text)
+    starts = [s for s, _ in spans]
     out: List[str] = []
-    i = n = 0
-    for start, end in _protected_spans(text):
-        seg, cnt = rx.subn(repl, text[i:start])
-        out.append(seg)
-        out.append(text[start:end])
-        n += cnt
-        i = end
-    seg, cnt = rx.subn(repl, text[i:])
-    out.append(seg)
-    n += cnt
+    last = n = 0
+    for m in rx.finditer(text):
+        k = bisect.bisect_right(starts, m.start()) - 1
+        if k >= 0 and spans[k][1] > m.start():
+            continue  # match begins inside a protected span
+        if k + 1 < len(spans) and spans[k + 1][0] < m.end():
+            continue  # match runs into the next protected span
+        out.append(text[last:m.start()])
+        out.append(m.expand(repl))
+        last = m.end()
+        n += 1
+    out.append(text[last:])
     return "".join(out), n
 
 

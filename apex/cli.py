@@ -162,12 +162,16 @@ def cmd_elevate(args: argparse.Namespace) -> int:
     for note in det_res.notes:
         emit(c.dim("  note: {0}".format(note)))
 
-    # Validate final result.
+    # Validate final result. Output that does not parse is never written: with
+    # --in-place it would replace a working script with a broken one.
     final_val = validate_mod.validate(elevated, cls.language)
     if not final_val.ok:
-        emit(c.red("  WARNING: elevated script failed syntax validation:"))
+        emit(c.red("  elevated script failed syntax validation; nothing written:"))
         for e in final_val.errors[:8]:
             emit(c.dim("    {0}".format(e)))
+        if not validate_mod.validate(original, cls.language).ok:
+            emit(c.dim("  (the input script itself does not parse; fix it and re-run)"))
+        return 1
 
     # Build report.
     report = report_mod.build_report(
@@ -183,6 +187,9 @@ def cmd_elevate(args: argparse.Namespace) -> int:
         _stdout(elevated)
     else:
         out_path = args.output or _default_out(args.script)
+        if not args.in_place and _same_file(out_path, args.script):
+            emit(c.red("  output path is the input script; use --in-place to overwrite it (keeps a backup)"))
+            return 1
         if args.in_place:
             try:
                 bak = _backup(args.script)
@@ -212,15 +219,20 @@ def cmd_elevate(args: argparse.Namespace) -> int:
     n_skip = len(det_res.skipped) + len(det_res.not_needed)
     if n_skip:
         summary.append("{0} block(s) not needed".format(n_skip))
-    emit(c.bold("  done: {0}, engine={1}{2}".format(
-        ", ".join(summary), engine_label,
-        ", syntax OK" if final_val.ok else ", SYNTAX ERRORS")))
-    return 0 if final_val.ok else 1
+    emit(c.bold("  done: {0}, engine={1}, syntax OK".format(", ".join(summary), engine_label)))
+    return 0
 
 
 def _default_out(path: str) -> str:
     stem, ext = os.path.splitext(path)
     return "{0}.apex{1}".format(stem, ext or ".sh")
+
+
+def _same_file(a: str, b: str) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 def _strip_ext(path: str) -> str:
@@ -303,7 +315,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0
     try:
         return args.func(args)
-    except FileNotFoundError as exc:
+    except OSError as exc:  # missing file, a directory, permission denied, ...
         print("apex: {0}".format(exc), file=sys.stderr)
         return 1
     except KeyboardInterrupt:
