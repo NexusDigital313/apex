@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
+from .classify import BASH_COMPATIBLE, shebang_interpreter
 from .rubrics import Rewrite, Rubric, Transform
 
 DEFAULT_SHEBANG = "#!/usr/bin/env bash"
@@ -90,11 +91,16 @@ def _split_shebang(text: str) -> Tuple[str, str]:
     return DEFAULT_SHEBANG, text
 
 
-def _needs_bash(shebang: str) -> bool:
-    """The injected blocks use bash features (local, set -E, declare -A, printf -v).
-    A POSIX sh / dash shebang must be upgraded for them to be valid."""
-    s = shebang.strip()
-    return bool(s) and "bash" not in s and s.rstrip("/").endswith(("sh", "dash"))
+def _bash_shebang(shebang: str) -> Optional[str]:
+    """The injected blocks use bash features (local, set -E, declare -A, printf -v),
+    so a POSIX sh / dash / ash shebang is upgraded. Returns the replacement (with
+    any shell flags such as `#!/bin/sh -e` kept as a `set` line), or None when no
+    upgrade is needed."""
+    interp, args = shebang_interpreter(shebang)
+    if interp not in ("sh", "dash", "ash"):
+        return None
+    flags = [a for a in args if a[:1] in "-+"]
+    return DEFAULT_SHEBANG + ("\nset " + " ".join(flags) if flags else "")
 
 
 # Heredoc opener: `<< WORD`, `<<-WORD`, `<< "WORD"`, `<< 'WORD'`. The `\w+`
@@ -262,6 +268,12 @@ def elevate(text: str, rubric: Rubric, language: str = "shell",
         )
         return result
 
+    interp, _ = shebang_interpreter(text)
+    if interp and interp.rstrip("0123456789.") not in BASH_COMPATIBLE:
+        result.notes.append(
+            "script runs under {0}; APEX's blocks are bash, so it was left unchanged".format(interp))
+        return result
+
     validate_fn = validator or _default_validator
     shebang, body = _split_shebang(text)
     # Evaluate every self-driving gate against the user's own code, never
@@ -293,8 +305,9 @@ def elevate(text: str, rubric: Rubric, language: str = "shell",
         result.decisions.append(Decision(t.id, "applied", reason))
 
     # shebang upgrade is decided up-front so rewrite candidates validate as bash
-    upgraded = _needs_bash(shebang)
-    out_shebang = DEFAULT_SHEBANG if upgraded else shebang
+    new_shebang = _bash_shebang(shebang)
+    upgraded = new_shebang is not None
+    out_shebang = new_shebang if upgraded else shebang
 
     def _assemble(_body: str) -> str:
         return _render(out_shebang, preamble_blocks, _body, append_blocks, rubric)
@@ -354,7 +367,7 @@ def elevate(text: str, rubric: Rubric, language: str = "shell",
     if upgraded:
         result.notes.append(
             "upgraded shebang '{0}' -> '{1}' (injected blocks use bash features)".format(
-                shebang.strip(), DEFAULT_SHEBANG)
+                shebang.strip(), out_shebang.replace("\n", "; "))
         )
 
     result.elevated = _assemble(body_work)

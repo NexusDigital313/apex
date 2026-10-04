@@ -1,25 +1,25 @@
 #!/bin/bash
 
 # ===== APEX elevation preamble :: Hardened, observable, idempotent, safely-concurrent automation: bash scripts pass shellcheck clean under strict mode with trapped error/cleanup, full CLI ergonomics, structured logging, dependency preflight, single-instance locking, and disciplined exit codes; Python scripts use argparse + logging + type hints + pathlib + list-form subprocess + context managers + narrow exception handling + explicit exit codes. This is the fallback "make any ordinary script production-grade" domain. =====
-# >>> APEX[DT-BASH-STRICT-HEADER] Canonical strict-mode bash header: portable shebang via env, capital -E so traps inherit into functions/subshells, errexit/nounset/pipefail, safe IFS, and immutable program metadata. Paste directly under any new or hardened bash script. >>>
+# >>> APEX[DT-BASH-STRICT-HEADER] Canonical strict-mode bash header: portable shebang via env, capital -E so traps inherit into functions/subshells, errexit/nounset/pipefail, and program metadata. IFS is left alone and nothing is readonly, so the script's own word splitting and variables (VERSION, PROG, ...) keep working. Paste directly under any new or hardened bash script. >>>
 #
 # <one-line description>
 #
 set -Eeuo pipefail
-IFS=$'\n\t'
 
 # --- program metadata ---------------------------------------------------
-readonly PROG="${0##*/}"
-readonly VERSION="1.0.0"
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
+PROG="${0##*/}"
+VERSION="1.0.0"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 
 # --- exit codes ---------------------------------------------------------
-readonly E_OK=0 E_USAGE=2 E_DEP=3 E_PERM=4 E_LOCK=5 E_RUNTIME=1
+E_OK=0 E_USAGE=2 E_DEP=3 E_PERM=4 E_LOCK=5 E_RUNTIME=1
 
 # --- runtime flags (defaults) -------------------------------------------
-DRY_RUN=false
-VERBOSE=false
-LOG_LEVEL="INFO"
+DRY_RUN="${DRY_RUN:-false}"
+VERBOSE="${VERBOSE:-false}"
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
+ASSUME_YES="${ASSUME_YES:-false}"
 # <<< APEX[DT-BASH-STRICT-HEADER] <<<
 
 # >>> APEX[DT-BASH-LOG-TRAP-SCAFFOLD] Structured leveled logger writing timestamped lines to stderr, an optional run() wrapper honoring --dry-run, a die() helper, and the ERR/EXIT/signal trap set with cleanup. Provides BASH-ERR-EXIT-TRAP, BASH-SIGNAL-HANDLING, LOG-STRUCTURED-LEVELS, CLI-DRY-RUN, and EXIT-CODE-DISCIPLINE in one block. >>>
@@ -55,7 +55,7 @@ trap 'on_signal TERM' TERM
 trap 'on_signal HUP'  HUP
 # <<< APEX[DT-BASH-LOG-TRAP-SCAFFOLD] <<<
 
-# >>> APEX[DT-BASH-ARGPARSE-SKELETON] Argument parser supporting GNU-style long flags and short flags, both --opt value and --opt=value forms, --help/--version/--dry-run/--verbose/--quiet, positional collection, unknown-flag rejection, and a quoted-here-doc usage(). Implements BASH-ARG-PARSING, CLI-HELP-USAGE, CLI-VERSION-FLAG, CLI-DRY-RUN, CLI-VERBOSE-QUIET. >>>
+# >>> APEX[DT-BASH-ARGPARSE-SKELETON] Argument parser supporting GNU-style long flags and short flags, both --opt value and --opt=value forms, --help/--version/--dry-run/--yes/--verbose/--quiet, positional collection, unknown-flag rejection, and a quoted-here-doc usage(). Implements BASH-ARG-PARSING, CLI-HELP-USAGE, CLI-VERSION-FLAG, CLI-DRY-RUN, CLI-VERBOSE-QUIET. >>>
 usage(){
   cat <<'EOF'
 Usage: PROG [OPTIONS] [ARGS...]
@@ -66,6 +66,7 @@ Options:
   -h, --help        Show this help and exit
       --version     Print version and exit
   -n, --dry-run     Show actions without performing them
+  -y, --yes         Approve destructive operations without prompting
   -v, --verbose     Enable debug logging
   -q, --quiet       Only log warnings and errors
 
@@ -80,6 +81,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)    usage; exit 0 ;;
     --version)    printf '%s %s\n' "$PROG" "$VERSION"; exit 0 ;;
     -n|--dry-run) DRY_RUN=true; shift ;;
+    -y|--yes)     ASSUME_YES=true; shift ;;
     -v|--verbose) VERBOSE=true; LOG_LEVEL="DEBUG"; shift ;;
     -q|--quiet)   LOG_LEVEL="WARN"; shift ;;
     --opt=*)      OPT="${1#*=}"; shift ;;
@@ -89,16 +91,21 @@ while [[ $# -gt 0 ]]; do
     *)            POSITIONAL+=("$1"); shift ;;
   esac
 done
-set -- "${POSITIONAL[@]:-}"
+set -- ${POSITIONAL[@]+"${POSITIONAL[@]}"}
 # <<< APEX[DT-BASH-ARGPARSE-SKELETON] <<<
 
-# >>> APEX[DT-BASH-DESTRUCTIVE-GUARD] Confirmation + dry-run guard for destructive operations (rm -rf, mkfs, dd, truncate). safe_rm() refuses empty/'/'/'~' targets, honors --dry-run, and prompts unless --yes was given. Fires when the script performs irreversible deletes/writes (controls IDEMPOTENCY, CLI-DRY-RUN, BASH-ROOT-GUARD). >>>
+# >>> APEX[DT-BASH-DESTRUCTIVE-GUARD] Confirmation + dry-run guard for destructive operations (rm -rf, mkfs, dd, truncate). safe_rm() refuses empty/'/'/'~' targets, honors --dry-run, and prompts unless --yes was given (with no terminal it stops with an error rather than skip the delete). Fires when the script performs irreversible deletes/writes (controls IDEMPOTENCY, CLI-DRY-RUN, BASH-ROOT-GUARD). >>>
 # --- destructive-operation guard ---------------------------------------
 # Wrap irreversible deletes. Refuses to remove '', '/', '/*', or a bare
 # $HOME; no-ops under --dry-run; requires confirmation unless ASSUME_YES.
+# With no terminal to ask (cron, pipes) it fails loudly instead of skipping:
+# approve unattended deletes with --yes or ASSUME_YES=true.
+declare -F log >/dev/null || log(){ local level="$1"; shift; printf '%s [%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$*" >&2; }
+declare -F die >/dev/null || die(){ local code="$1"; shift; log ERROR "$*"; exit "$code"; }
 ASSUME_YES="${ASSUME_YES:-false}"
 confirm(){
   [[ "$ASSUME_YES" == true ]] && return 0
+  [[ -t 0 ]] || die "${E_USAGE:-2}" "no terminal to confirm '$1'; re-run with --yes (or ASSUME_YES=true) to approve"
   local reply; printf '%s [y/N] ' "$1" >&2; read -r reply
   [[ "$reply" =~ ^[Yy]$ ]]
 }

@@ -93,7 +93,10 @@ def build_report(
 
     out.append("## Validation")
     out.append("")
-    out.append("- syntax: **checked**{0}".format(" via {0}".format(validation_tool) if validation_tool else ""))
+    if validation_tool:
+        out.append("- syntax: **checked** via {0}".format(validation_tool))
+    else:
+        out.append("- syntax: **not checked** (no checker available)")
     if validation_warnings:
         out.append("- linter notes ({0}):".format(len(validation_warnings)))
         for w in validation_warnings[:15]:

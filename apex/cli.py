@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from typing import Dict, List, Optional
 
@@ -52,9 +53,17 @@ class C:
         return self._w("2", s)
 
 
+# surrogateescape round-trips bytes that aren't valid UTF-8 (e.g. Latin-1
+# comments) unchanged, instead of replacing them with U+FFFD.
 def _read(path: str) -> str:
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
         return fh.read()
+
+
+def _stdout(s: str) -> None:
+    sys.stdout.flush()
+    sys.stdout.buffer.write(s.encode("utf-8", "surrogateescape"))
+    sys.stdout.flush()
 
 
 def _pick_rubric(rubrics: Dict[str, Rubric], domain: str) -> Optional[Rubric]:
@@ -171,15 +180,20 @@ def cmd_elevate(args: argparse.Namespace) -> int:
 
     # Output.
     if args.stdout:
-        sys.stdout.write(elevated)
+        _stdout(elevated)
     else:
         out_path = args.output or _default_out(args.script)
         if args.in_place:
-            _backup(args.script)
+            try:
+                bak = _backup(args.script)
+            except OSError as exc:
+                emit(c.red("  could not back up {0} ({1}); original left untouched".format(args.script, exc)))
+                return 1
+            emit(c.dim("  backup   -> {0}".format(bak)))
             out_path = args.script
-        with open(out_path, "w", encoding="utf-8") as fh:
+        with open(out_path, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write(elevated)
-        _chmod_x(out_path, original)
+        _copy_mode(args.script, out_path, original)
         emit(c.green("  elevated -> {0}".format(out_path)))
 
         report_path = args.report or (_strip_ext(out_path) + ".report.md")
@@ -190,7 +204,7 @@ def cmd_elevate(args: argparse.Namespace) -> int:
 
     if args.diff:
         diff = report_mod.unified_diff(original, elevated, os.path.basename(args.script))
-        sys.stdout.write("\n" + _colorize_diff(diff, c) + "\n")
+        _stdout("\n" + _colorize_diff(diff, c) + "\n")
 
     summary = ["{0} change(s)".format(len(det_res.applied))]
     if det_res.rewritten:
@@ -213,22 +227,24 @@ def _strip_ext(path: str) -> str:
     return os.path.splitext(path)[0]
 
 
-def _backup(path: str) -> None:
+def _backup(path: str) -> str:
+    """Byte-exact copy (contents and permissions). Raises OSError on failure so
+    the caller never overwrites a script it could not back up."""
     bak = path + ".apex.bak"
+    shutil.copy2(path, bak)
+    return bak
+
+
+def _copy_mode(src_path: str, out_path: str, original_text: str) -> None:
+    # Same permissions as the source (a 0700 script stays 0700), plus execute
+    # wherever there is read access if it is a #! script.
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as src, open(bak, "w", encoding="utf-8") as dst:
-            dst.write(src.read())
+        mode = os.stat(src_path).st_mode & 0o7777
+        if original_text.startswith("#!"):
+            mode |= (mode & 0o444) >> 2
+        os.chmod(out_path, mode)
     except OSError:
         pass
-
-
-def _chmod_x(out_path: str, original_text: str) -> None:
-    # keep it executable if it has a shebang
-    if original_text.startswith("#!"):
-        try:
-            os.chmod(out_path, 0o755)
-        except OSError:
-            pass
 
 
 def _colorize_diff(diff: str, c: C) -> str:

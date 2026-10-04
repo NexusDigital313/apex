@@ -35,7 +35,7 @@ def _have(cmd: str) -> bool:
 
 def _write_tmp(text: str, suffix: str) -> str:
     fd, path = tempfile.mkstemp(suffix=suffix, prefix="apex.")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as fh:
         fh.write(text)
     return path
 
@@ -43,13 +43,19 @@ def _write_tmp(text: str, suffix: str) -> str:
 def validate(text: str, language: str = "shell") -> ValidationResult:
     if language == "python":
         return _validate_python(text)
+    if language in ("zsh", "ksh", "mksh", "fish"):
+        return _validate_other_shell(text, language)
+    if language != "shell":
+        return ValidationResult(True, warnings=["no syntax checker for {0}; not checked".format(language)])
     return _validate_shell(text)
 
 
 def _validate_shell(text: str) -> ValidationResult:
     path = _write_tmp(text, ".sh")
+    tools: List[str] = []
     try:
         if _have("bash"):
+            tools.append("bash -n")
             proc = subprocess.run(
                 ["bash", "-n", path], capture_output=True, text=True, timeout=30
             )
@@ -57,6 +63,7 @@ def _validate_shell(text: str) -> ValidationResult:
                 return ValidationResult(False, errors=_lines(proc.stderr), tool="bash -n")
         warnings: List[str] = []
         if _have("shellcheck"):
+            tools.append("shellcheck")
             proc = subprocess.run(
                 ["shellcheck", "-S", "warning", "-f", "gcc", path],
                 capture_output=True,
@@ -71,7 +78,25 @@ def _validate_shell(text: str) -> ValidationResult:
             if parse_errors:
                 return ValidationResult(False, errors=parse_errors, tool="shellcheck")
             warnings = findings[:25]
-        return ValidationResult(True, warnings=warnings, tool="bash -n + shellcheck")
+        if not tools:
+            return ValidationResult(True, warnings=["neither bash nor shellcheck found; not checked"])
+        return ValidationResult(True, warnings=warnings, tool=" + ".join(tools))
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return ValidationResult(True, warnings=["validation skipped: {0}".format(exc)])
+    finally:
+        _rm(path)
+
+
+def _validate_other_shell(text: str, shell: str) -> ValidationResult:
+    """zsh / ksh / fish parse their own syntax; bash -n would reject valid code."""
+    if not _have(shell):
+        return ValidationResult(True, warnings=["{0} not installed; not checked".format(shell)])
+    path = _write_tmp(text, "." + shell)
+    try:
+        proc = subprocess.run([shell, "-n", path], capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            return ValidationResult(False, errors=_lines(proc.stderr), tool=shell + " -n")
+        return ValidationResult(True, tool=shell + " -n")
     except (subprocess.TimeoutExpired, OSError) as exc:
         return ValidationResult(True, warnings=["validation skipped: {0}".format(exc)])
     finally:

@@ -13,8 +13,8 @@
     },
     {
       "id": "RW-BASH-BACKTICKS",
-      "description": "modernise legacy `…` command substitution to $(…) (ShellCheck SC2006)",
-      "pattern": "`([^`]*)`",
+      "description": "modernise legacy `…` command substitution to $(…) (ShellCheck SC2006); left alone when the substitution contains a backslash, which `…` and $(…) treat differently",
+      "pattern": "`([^`\\\\]*)`",
       "replacement": "$(\\1)",
       "apply_when": { "language": "shell" }
     }
@@ -316,9 +316,9 @@
   "deterministic_transforms": [
     {
       "id": "DT-BASH-STRICT-HEADER",
-      "description": "Canonical strict-mode bash header: portable shebang via env, capital -E so traps inherit into functions/subshells, errexit/nounset/pipefail, safe IFS, and immutable program metadata. Paste directly under any new or hardened bash script.",
+      "description": "Canonical strict-mode bash header: portable shebang via env, capital -E so traps inherit into functions/subshells, errexit/nounset/pipefail, and program metadata. IFS is left alone and nothing is readonly, so the script's own word splitting and variables (VERSION, PROG, ...) keep working. Paste directly under any new or hardened bash script.",
       "trigger": "Bash script missing `set -euo pipefail`, safe IFS, or program-name/version constants (controls BASH-STRICT-MODE, CLI-VERSION-FLAG).",
-      "implementation": "#\n# <one-line description>\n#\nset -Eeuo pipefail\nIFS=$'\\n\\t'\n\n# --- program metadata ---------------------------------------------------\nreadonly PROG=\"${0##*/}\"\nreadonly VERSION=\"1.0.0\"\nreadonly SCRIPT_DIR=\"$(cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")\" >/dev/null 2>&1 && pwd -P)\"\n\n# --- exit codes ---------------------------------------------------------\nreadonly E_OK=0 E_USAGE=2 E_DEP=3 E_PERM=4 E_LOCK=5 E_RUNTIME=1\n\n# --- runtime flags (defaults) -------------------------------------------\nDRY_RUN=false\nVERBOSE=false\nLOG_LEVEL=\"INFO\"",
+      "implementation": "#\n# <one-line description>\n#\nset -Eeuo pipefail\n\n# --- program metadata ---------------------------------------------------\nPROG=\"${0##*/}\"\nVERSION=\"1.0.0\"\nSCRIPT_DIR=\"$(cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")\" >/dev/null 2>&1 && pwd -P)\"\n\n# --- exit codes ---------------------------------------------------------\nE_OK=0 E_USAGE=2 E_DEP=3 E_PERM=4 E_LOCK=5 E_RUNTIME=1\n\n# --- runtime flags (defaults) -------------------------------------------\nDRY_RUN=\"${DRY_RUN:-false}\"\nVERBOSE=\"${VERBOSE:-false}\"\nLOG_LEVEL=\"${LOG_LEVEL:-INFO}\"\nASSUME_YES=\"${ASSUME_YES:-false}\"",
       "placement": "Top of the file, replacing the existing shebang and any ad-hoc `set` lines.",
       "apply_when": {
         "absent": [
@@ -341,14 +341,17 @@
     },
     {
       "id": "DT-BASH-ARGPARSE-SKELETON",
-      "description": "Argument parser supporting GNU-style long flags and short flags, both --opt value and --opt=value forms, --help/--version/--dry-run/--verbose/--quiet, positional collection, unknown-flag rejection, and a quoted-here-doc usage(). Implements BASH-ARG-PARSING, CLI-HELP-USAGE, CLI-VERSION-FLAG, CLI-DRY-RUN, CLI-VERBOSE-QUIET.",
+      "description": "Argument parser supporting GNU-style long flags and short flags, both --opt value and --opt=value forms, --help/--version/--dry-run/--yes/--verbose/--quiet, positional collection, unknown-flag rejection, and a quoted-here-doc usage(). Implements BASH-ARG-PARSING, CLI-HELP-USAGE, CLI-VERSION-FLAG, CLI-DRY-RUN, CLI-VERBOSE-QUIET.",
       "trigger": "Bash script parses $1/$2 positionally or lacks --help/--version/--dry-run/--verbose (controls BASH-ARG-PARSING, CLI-HELP-USAGE).",
-      "implementation": "usage(){\n  cat <<'EOF'\nUsage: PROG [OPTIONS] [ARGS...]\n\n  Short description of what the script does.\n\nOptions:\n  -h, --help        Show this help and exit\n      --version     Print version and exit\n  -n, --dry-run     Show actions without performing them\n  -v, --verbose     Enable debug logging\n  -q, --quiet       Only log warnings and errors\n\nExit codes:\n  0 success  2 usage  3 missing dependency  4 permission  5 lock held\nEOF\n}\n\nPOSITIONAL=()\nwhile [[ $# -gt 0 ]]; do\n  case \"$1\" in\n    -h|--help)    usage; exit 0 ;;\n    --version)    printf '%s %s\\n' \"$PROG\" \"$VERSION\"; exit 0 ;;\n    -n|--dry-run) DRY_RUN=true; shift ;;\n    -v|--verbose) VERBOSE=true; LOG_LEVEL=\"DEBUG\"; shift ;;\n    -q|--quiet)   LOG_LEVEL=\"WARN\"; shift ;;\n    --opt=*)      OPT=\"${1#*=}\"; shift ;;\n    --opt)        OPT=\"${2:?--opt requires a value}\"; shift 2 ;;\n    --)           shift; POSITIONAL+=(\"$@\"); break ;;\n    -*)           usage >&2; die \"$E_USAGE\" \"unknown option: $1\" ;;\n    *)            POSITIONAL+=(\"$1\"); shift ;;\n  esac\ndone\nset -- \"${POSITIONAL[@]:-}\"",
+      "implementation": "usage(){\n  cat <<'EOF'\nUsage: PROG [OPTIONS] [ARGS...]\n\n  Short description of what the script does.\n\nOptions:\n  -h, --help        Show this help and exit\n      --version     Print version and exit\n  -n, --dry-run     Show actions without performing them\n  -y, --yes         Approve destructive operations without prompting\n  -v, --verbose     Enable debug logging\n  -q, --quiet       Only log warnings and errors\n\nExit codes:\n  0 success  2 usage  3 missing dependency  4 permission  5 lock held\nEOF\n}\n\nPOSITIONAL=()\nwhile [[ $# -gt 0 ]]; do\n  case \"$1\" in\n    -h|--help)    usage; exit 0 ;;\n    --version)    printf '%s %s\\n' \"$PROG\" \"$VERSION\"; exit 0 ;;\n    -n|--dry-run) DRY_RUN=true; shift ;;\n    -y|--yes)     ASSUME_YES=true; shift ;;\n    -v|--verbose) VERBOSE=true; LOG_LEVEL=\"DEBUG\"; shift ;;\n    -q|--quiet)   LOG_LEVEL=\"WARN\"; shift ;;\n    --opt=*)      OPT=\"${1#*=}\"; shift ;;\n    --opt)        OPT=\"${2:?--opt requires a value}\"; shift 2 ;;\n    --)           shift; POSITIONAL+=(\"$@\"); break ;;\n    -*)           usage >&2; die \"$E_USAGE\" \"unknown option: $1\" ;;\n    *)            POSITIONAL+=(\"$1\"); shift ;;\n  esac\ndone\nset -- ${POSITIONAL[@]+\"${POSITIONAL[@]}\"}",
       "placement": "After the log/trap scaffold; replace the script's existing argument handling. Replace the literal PROG in the here-doc with the real program name if you want it interpolated (use an unquoted here-doc only if so).",
       "apply_when": {
         "absent": [
           "getopts",
-          "while\\s+\\[\\[\\s+\\$#"
+          "while\\s+\\[\\[\\s+\\$#",
+          "\\$[1-9@*#]",
+          "\\$\\{[1-9@*#]",
+          "^\\s*shift\\b"
         ]
       }
     },
@@ -432,7 +435,7 @@
     },
     {
       "id": "DT-BASH-DESTRUCTIVE-GUARD",
-      "description": "Confirmation + dry-run guard for destructive operations (rm -rf, mkfs, dd, truncate). safe_rm() refuses empty/'/'/'~' targets, honors --dry-run, and prompts unless --yes was given. Fires when the script performs irreversible deletes/writes (controls IDEMPOTENCY, CLI-DRY-RUN, BASH-ROOT-GUARD).",
+      "description": "Confirmation + dry-run guard for destructive operations (rm -rf, mkfs, dd, truncate). safe_rm() refuses empty/'/'/'~' targets, honors --dry-run, and prompts unless --yes was given (with no terminal it stops with an error rather than skip the delete). Fires when the script performs irreversible deletes/writes (controls IDEMPOTENCY, CLI-DRY-RUN, BASH-ROOT-GUARD).",
       "trigger": "Script runs rm -rf / mkfs / dd / truncate against a path (destructive, irreversible operations).",
       "apply_when": {
         "any_present": [
@@ -445,7 +448,7 @@
           "safe_rm\\(\\)"
         ]
       },
-      "implementation": "# --- destructive-operation guard ---------------------------------------\n# Wrap irreversible deletes. Refuses to remove '', '/', '/*', or a bare\n# $HOME; no-ops under --dry-run; requires confirmation unless ASSUME_YES.\nASSUME_YES=\"${ASSUME_YES:-false}\"\nconfirm(){\n  [[ \"$ASSUME_YES\" == true ]] && return 0\n  local reply; printf '%s [y/N] ' \"$1\" >&2; read -r reply\n  [[ \"$reply\" =~ ^[Yy]$ ]]\n}\nsafe_rm(){\n  local target=\"${1:?safe_rm: target required}\"\n  case \"$target\" in\n    \"\"|/|/\\*|\"$HOME\"|\"$HOME/\") die \"${E_USAGE:-2}\" \"refusing to remove unsafe path: '$target'\" ;;\n  esac\n  if [[ \"${DRY_RUN:-false}\" == true ]]; then log INFO \"DRY-RUN: rm -rf -- $target\"; return 0; fi\n  confirm \"remove '$target' recursively?\" || { log WARN \"skipped: $target\"; return 0; }\n  rm -rf -- \"$target\"\n}",
+      "implementation": "# --- destructive-operation guard ---------------------------------------\n# Wrap irreversible deletes. Refuses to remove '', '/', '/*', or a bare\n# $HOME; no-ops under --dry-run; requires confirmation unless ASSUME_YES.\n# With no terminal to ask (cron, pipes) it fails loudly instead of skipping:\n# approve unattended deletes with --yes or ASSUME_YES=true.\ndeclare -F log >/dev/null || log(){ local level=\"$1\"; shift; printf '%s [%s] %s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$level\" \"$*\" >&2; }\ndeclare -F die >/dev/null || die(){ local code=\"$1\"; shift; log ERROR \"$*\"; exit \"$code\"; }\nASSUME_YES=\"${ASSUME_YES:-false}\"\nconfirm(){\n  [[ \"$ASSUME_YES\" == true ]] && return 0\n  [[ -t 0 ]] || die \"${E_USAGE:-2}\" \"no terminal to confirm '$1'; re-run with --yes (or ASSUME_YES=true) to approve\"\n  local reply; printf '%s [y/N] ' \"$1\" >&2; read -r reply\n  [[ \"$reply\" =~ ^[Yy]$ ]]\n}\nsafe_rm(){\n  local target=\"${1:?safe_rm: target required}\"\n  case \"$target\" in\n    \"\"|/|/\\*|\"$HOME\"|\"$HOME/\") die \"${E_USAGE:-2}\" \"refusing to remove unsafe path: '$target'\" ;;\n  esac\n  if [[ \"${DRY_RUN:-false}\" == true ]]; then log INFO \"DRY-RUN: rm -rf -- $target\"; return 0; fi\n  confirm \"remove '$target' recursively?\" || { log WARN \"skipped: $target\"; return 0; }\n  rm -rf -- \"$target\"\n}",
       "placement": "After the log/trap scaffold and argument parsing, before the main body. safe_rm() must be defined before the script's own code calls it."
     }
   ]

@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| Detected domain | `installer` (confidence 35.0) |
+| Detected domain | `installer` (confidence 14.5) |
 | Target standard | **Production-grade automated/interactive OS provisioning: Kickstart (RHEL/Fedora/Rocky/Alma), Debian preseed + Ubuntu Subiquity autoinstall/cloud-init, Arch pacstrap installer, SUSE AutoYaST, generic cloud-init; aligned to vendor reference docs, CIS-style secure post-install, and reproducible-config / dry-run / fail-closed automation discipline.** |
 | Engine | deterministic (self-driving) |
 | Language | shell |
 | Controls in rubric | 24 (24 automatable) |
 
-**Why this domain:** matched `pacstrap`, `genfstab`, `mkfs.`, `parted`, `pacstrap`, `parted`, `re:\bmkfs(\.\w+)?\b`, `genfstab`
+**Why this domain:** matched `pacstrap`, `genfstab`, `mkfs.`, `parted`, `re:\bmkfs(\.\w+)?\b`
 
 ## What was elevated
 
@@ -87,9 +87,9 @@
 
 - syntax: **checked** via bash -n + shellcheck
 - linter notes (3):
-  - `/tmp/apex.7p1qsitw.sh:223:38: warning: recipe appears unused. Verify use (or export if used externally). [SC2034]`
-  - `/tmp/apex.7p1qsitw.sh:257:90: warning: Quote this to prevent word splitting. [SC2046]`
-  - `/tmp/apex.7p1qsitw.sh:344:62: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]`
+  - `/tmp/apex.ckpgxao0.sh:228:38: warning: recipe appears unused. Verify use (or export if used externally). [SC2034]`
+  - `/tmp/apex.ckpgxao0.sh:266:94: warning: Quote this to prevent word splitting. [SC2046]`
+  - `/tmp/apex.ckpgxao0.sh:357:62: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]`
 
 ## References
 

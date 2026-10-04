@@ -203,7 +203,7 @@ class Runner:
             for fw in ("uefi", "bios"):
                 for enc in ("0", "1"):
                     env = dict(os.environ, FIRMWARE=fw, ENCRYPT=enc, CRYPT_PART="/dev/sda2",
-                               HOSTNAME="h", USERNAME="u", USER_PW="p", SSH_PUBKEY="k")
+                               TARGET_HOSTNAME="h", USERNAME="u", USER_PW="p", SSH_PUBKEY="k")
                     out = subprocess.run(["bash", "-euc", harness], env=env, capture_output=True,
                                          text=True, timeout=30)
                     parsed = subprocess.run(["bash", "-n"], input=out.stdout, capture_output=True,
@@ -212,8 +212,123 @@ class Runner:
                     self.check("arch chroot script[{0},encrypt={1}]".format(fw, enc),
                                out.returncode == 0 and parsed.returncode == 0 and want_crypt,
                                (out.stderr or parsed.stderr).strip()[-200:])
+            self._arch_install_cases(tmp)
+            self._behaviour_cases(tmp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    # Every external command install_arch touches, replaced by a recorder.
+    _STUBS = ("pacman sgdisk wipefs pvcreate vgcreate lvcreate mkfs.ext4 mkfs.fat mkswap mount "
+              "umount mkdir swapon pacstrap udevadm blkid openssl lsblk findmnt").split()
+    _DESTRUCTIVE = ("sgdisk", "wipefs", "pvcreate", "mkfs.", "mount ", "pacstrap", "pacman",
+                    "cryptsetup luksFormat", "genfstab", "arch-chroot", "swapon")
+
+    def _arch_install_cases(self, tmp: str) -> None:
+        """Run the real install_arch with every system command stubbed, for each
+        disk type / firmware / encryption combination, in dry-run and real mode."""
+        blocks = {t.id: t.implementation for t in _RUBRICS["installer"].transforms}
+        mnt = os.path.join(tmp, "mnt")
+        code = "\n".join(blocks[b] for b in ("LOGGING", "RETRY", "RESOLVE_TARGET_DISK",
+                                              "CONFIRM_DESTROY_GUARD", "LUKS_PARTITION_FLOW",
+                                              "ARCH_INSTALLER_SCAFFOLD")).replace("/mnt", mnt)
+        stubs = "".join('{0}(){{ echo "{0} $*" >> "$CALLS"; {1}}}\n'.format(
+            s, "echo 1111-AAAA; " if s == "blkid" else "echo HASH; " if s == "openssl" else "")
+            for s in self._STUBS)
+        stubs += ('cryptsetup(){ echo "cryptsetup $*" >> "$CALLS"; cat >/dev/null; }\n'
+                  'genfstab(){ echo "genfstab $*" >> "$CALLS"; }\n'
+                  'arch-chroot(){ echo "arch-chroot $*" >> "$CALLS"; cat > "$CHROOT"; }\n')
+        harness = ("set -Eeuo pipefail\nMODE=unattended ASSUME_YES=1\n" + code + "\n" + stubs +
+                   "validate_target(){ :; }\ninstall_arch\n")
+        for disk, p in (("/dev/sda", "/dev/sda"), ("/dev/nvme0n1", "/dev/nvme0n1p")):
+            for fw in ("uefi", "bios"):
+                for enc in ("0", "1"):
+                    for dry in ("1", "0"):
+                        shutil.rmtree(mnt, ignore_errors=True)
+                        os.makedirs(os.path.join(mnt, "etc"))
+                        calls, chroot = os.path.join(tmp, "calls"), os.path.join(tmp, "chroot.sh")
+                        for f in (calls, chroot):
+                            open(f, "w").close()
+                        env = dict(os.environ, CALLS=calls, CHROOT=chroot, LOGFILE=os.path.join(tmp, "log"),
+                                   TARGET_DISK=disk, FIRMWARE=fw, ENCRYPT=enc, DRY_RUN=dry,
+                                   LUKS_PASSPHRASE="correct horse", TARGET_HOSTNAME="h", USERNAME="u",
+                                   USER_PW="p", SSH_PUBKEY="k")
+                        proc = subprocess.run(["bash", "-c", harness], env=env, stdin=subprocess.DEVNULL,
+                                              capture_output=True, text=True, timeout=60)
+                        log = open(calls).read()
+                        name = "arch install[{0},{1},encrypt={2},{3}]".format(
+                            os.path.basename(disk), fw, enc, "dry-run" if dry == "1" else "real")
+                        if dry == "1":
+                            ran = [c for c in self._DESTRUCTIVE if c in log]
+                            self.check(name, proc.returncode == 0 and not ran,
+                                       "ran for real: {0}; {1}".format(ran, proc.stderr.strip()[-200:]))
+                            continue
+                        want = []
+                        if fw == "uefi":
+                            want.append("mkfs.fat -F32 {0}1".format(p))
+                        elif enc == "1":
+                            want.append("mkfs.ext4 -F {0}2".format(p))  # plain /boot for GRUB
+                        want.append("cryptsetup luksFormat --batch-mode --type luks2 {0}{1}".format(
+                            p, 2 if fw == "uefi" else 3) if enc == "1" else "pvcreate {0}2".format(p))
+                        want.append("genfstab -U")
+                        missing = [w for w in want if w not in log]
+                        parsed = subprocess.run(["bash", "-n", chroot], capture_output=True, text=True)
+                        text = open(chroot).read()
+                        ok = (proc.returncode == 0 and not missing and parsed.returncode == 0
+                              and "/etc/hostname" in text and "echo 'h'" in text and "u:HASH" in text)
+                        self.check(name, ok, "exit {0}; missing {1}; {2}".format(
+                            proc.returncode, missing, (proc.stderr or parsed.stderr).strip()[-200:]))
+
+    def _behaviour_cases(self, tmp: str) -> None:
+        """Elevating must not change what an ordinary script does."""
+        g = _RUBRICS["generic"]
+
+        def run_elevated(src: str, args=(), env=None, lang="shell"):
+            path = os.path.join(tmp, "b.apex.sh")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(det.elevate(src, g, lang).elevated)
+            return subprocess.run(["bash", path] + list(args), env=dict(os.environ, **(env or {})),
+                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+        # unattended delete with no approval: stop loudly, don't skip silently
+        work = os.path.join(tmp, "w")
+        os.makedirs(work, exist_ok=True)
+        p = run_elevated('#!/bin/bash\nrm -rf "$WORK"\necho done\n', env={"WORK": work})
+        self.check("no terminal, no --yes -> error, nothing deleted",
+                   p.returncode != 0 and os.path.isdir(work) and "--yes" in p.stderr)
+        p = run_elevated('#!/bin/bash\nrm -rf "$WORK"\necho done\n', args=["--yes"], env={"WORK": work})
+        self.check("--yes approves the delete", p.returncode == 0 and not os.path.exists(work), p.stderr[-200:])
+
+        # the script's own flags and argument count survive
+        own = '#!/bin/bash\nF=0\nfor a in "$@"; do case $a in --force) F=1;; esac; done\necho "$F $#"\n'
+        self.check("script's own --force still works", run_elevated(own, ["--force"]).stdout.strip() == "1 1")
+        self.check("no args -> $# is 0", run_elevated(own).stdout.strip() == "0 0")
+
+        # the script's own VERSION and word splitting survive
+        p = run_elevated('#!/bin/bash\nVERSION=2.1\nL="a b"\nfor x in $L; do echo "$x"; done\necho "$VERSION"\n')
+        self.check("own VERSION + word splitting kept", p.stdout.split() == ["a", "b", "2.1"], p.stderr[-200:])
+
+        # shebangs: POSIX sh upgraded with its flags, other shells left alone
+        out = det.elevate('#!/bin/sh -e\nrm -rf "$X"\n', g, "shell").elevated.splitlines()
+        self.check("#!/bin/sh -e -> bash + set -e", out[:2] == ["#!/usr/bin/env bash", "set -e"], str(out[:2]))
+        zsh = '#!/usr/bin/env zsh\nprint -l ${(k)m}\nrm -rf "$X"\n'
+        lang = classify_mod.detect_language(zsh, "x.sh")
+        self.check("zsh script left unchanged", lang == "zsh" and det.elevate(zsh, g, lang).elevated == zsh)
+
+        # one keyword listed in both signature sets is not a domain
+        self.check("lone keyword -> generic", classify_mod.classify("pacstrap\n").domain == "generic")
+
+        # --in-place: exact backup, permissions kept
+        src = os.path.join(tmp, "inplace.sh")
+        raw = b"#!/bin/bash\n# caf\xe9\nrm -rf \"$X\"\n"
+        with open(src, "wb") as fh:
+            fh.write(raw)
+        os.chmod(src, 0o700)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "apex.py"), "--no-banner", "elevate", src,
+                            "--in-place", "--report", "-"], capture_output=True, text=True, timeout=120)
+        bak = open(src + ".apex.bak", "rb").read() if os.path.exists(src + ".apex.bak") else b""
+        self.check("--in-place backup is byte-exact", bak == raw, p.stderr[-200:])
+        self.check("--in-place keeps non-UTF-8 bytes", b"caf\xe9" in open(src, "rb").read())
+        self.check("--in-place keeps mode 700", (os.stat(src).st_mode & 0o777) == 0o700)
 
     def run(self) -> int:
         self.golden_suite()

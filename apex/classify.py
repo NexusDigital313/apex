@@ -103,12 +103,47 @@ class ClassificationResult:
         return self.domain == "generic"
 
 
+# Shells APEX's bash blocks can target (POSIX sh is upgraded to bash).
+BASH_COMPATIBLE = ("bash", "sh", "dash", "ash")
+# Other shells: classified and reported on, but never rewritten as bash.
+OTHER_SHELLS = ("zsh", "ksh", "mksh", "fish", "csh", "tcsh")
+
+
+def shebang_interpreter(text: str) -> Tuple[str, List[str]]:
+    """(interpreter name, its arguments) from a `#!` line; ("", []) if none.
+
+    Handles `#!/bin/sh -e` and `#!/usr/bin/env [-S] sh -eu`.
+    """
+    if not text.startswith("#!"):
+        return "", []
+    words = text[2:].split("\n", 1)[0].split()
+    if not words:
+        return "", []
+    prog, args = os.path.basename(words[0]), words[1:]
+    if prog == "env":
+        while args and args[0].startswith("-"):
+            args = args[1:]
+        if not args:
+            return "", []
+        prog, args = os.path.basename(args[0]), args[1:]
+    return prog, args
+
+
 def detect_language(text: str, filename: str = "") -> str:
-    head = text[:200]
-    if filename.endswith(".py") or re.search(r"^#!.*\bpython", head):
+    interp, _ = shebang_interpreter(text)
+    if interp:
+        if interp.startswith("python"):
+            return "python"
+        name = interp.rstrip("0123456789.")
+        if name in OTHER_SHELLS:
+            return name
+        if name in BASH_COMPATIBLE:
+            return "shell"
+    if filename.endswith(".py"):
         return "python"
-    if filename.endswith((".sh", ".bash")) or re.search(r"^#!.*\b(bash|sh|zsh|ksh)", head):
-        return "shell"
+    for sh in OTHER_SHELLS:
+        if filename.endswith("." + sh):
+            return sh
     # default to shell for bare scripts
     return "shell"
 
@@ -140,7 +175,14 @@ def _load_domains() -> Dict[str, Dict]:
                 if not key:
                     continue
                 if key in domains:
-                    domains[key]["signatures"].extend(entry.get("signatures", []))
+                    # skip signatures the built-ins already have, so one word
+                    # can't count twice toward the score and distinct-match rule
+                    have = {(s.get("kind", "keyword"), s.get("pattern")) for s in domains[key]["signatures"]}
+                    for sig in entry.get("signatures", []):
+                        ident = (sig.get("kind", "keyword"), sig.get("pattern"))
+                        if ident not in have:
+                            have.add(ident)
+                            domains[key]["signatures"].append(sig)
                     domains[key]["min_confidence"] = min(
                         domains[key]["min_confidence"], float(entry.get("min_confidence", 3.0))
                     )
