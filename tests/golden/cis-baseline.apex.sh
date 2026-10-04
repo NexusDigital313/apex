@@ -1,5 +1,11 @@
 #!/bin/bash
-# CIS baseline hardening (Level 1) - minimal
+# Copyright (c) 2026 Jacob Douglas Parmenter. All Rights Reserved.
+# Proprietary and Confidential.
+#
+# Unauthorized reproduction, copying, modification, distribution,
+# redistribution, publication, reverse engineering, decompilation, or
+# disassembly of this file, in whole or in part, via any medium, is
+# strictly prohibited without explicit prior written authorization.
 
 # ===== APEX elevation preamble :: DISA STIG (DoD/courtroom grade) for RHEL/Rocky/AlmaLinux 8 & 9 and Canonical Ubuntu 20.04/22.04 LTS, derived from the General Purpose OS SRG (GPOS-SRG). Maps to STIG IDs (RHEL-08-*, RHEL-09-*, UBTU-20-*, UBTU-22-*), legacy V-IDs, CCIs, and CAT I/II/III severity. =====
 # >>> APEX[DT-SSHD-DROPIN] Idempotently write a STIG sshd drop-in with FIPS ciphers/MACs/KEX and all session parameters, then validate and reload. On RHEL9 omit Ciphers/MACs/KEX (crypto-policy owns them) to avoid conflict. >>>
@@ -96,6 +102,8 @@ f=/etc/systemd/journald.conf; up(){ k=$1;v=$2; if grep -qE "^\s*#?\s*${k}=" $f; 
 # <<< APEX[DT-JOURNALD-LOGPERMS] <<<
 # ===== end APEX preamble =====
 
+
+# CIS baseline hardening (Level 1) - minimal
 echo "applying CIS hardening"
 sysctl -w net.ipv4.ip_forward=0
 echo "PermitRootLogin no" >> /etc/ssh/sshd_config

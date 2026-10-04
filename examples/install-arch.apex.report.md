@@ -87,9 +87,9 @@
 
 - syntax: **checked** via bash -n + shellcheck
 - linter notes (3):
-  - `/tmp/apex._fj166kc.sh:231:38: warning: recipe appears unused. Verify use (or export if used externally). [SC2034]`
-  - `/tmp/apex._fj166kc.sh:269:94: warning: Quote this to prevent word splitting. [SC2046]`
-  - `/tmp/apex._fj166kc.sh:360:62: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]`
+  - `/tmp/apex.2i66w35n.sh:237:38: warning: recipe appears unused. Verify use (or export if used externally). [SC2034]`
+  - `/tmp/apex.2i66w35n.sh:275:94: warning: Quote this to prevent word splitting. [SC2046]`
+  - `/tmp/apex.2i66w35n.sh:366:62: warning: ShellCheck can't follow non-constant source. Use a directive to specify location. [SC1090]`
 
 ## References
 

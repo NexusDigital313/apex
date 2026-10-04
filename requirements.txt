@@ -1,3 +1,11 @@
+# Copyright (c) 2026 Jacob Douglas Parmenter. All Rights Reserved.
+# Proprietary and Confidential.
+#
+# Unauthorized reproduction, copying, modification, distribution,
+# redistribution, publication, reverse engineering, decompilation, or
+# disassembly of this file, in whole or in part, via any medium, is
+# strictly prohibited without explicit prior written authorization.
+
 # APEX runs fully offline with ZERO third-party dependencies (Python 3.8+ stdlib only).
 # The deterministic, content-aware ("self-driving") engine is the only engine —
 # there is no network call, no API key, and nothing to install.

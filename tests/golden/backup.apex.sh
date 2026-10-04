@@ -1,5 +1,11 @@
 #!/bin/bash
-# nightly backup
+# Copyright (c) 2026 Jacob Douglas Parmenter. All Rights Reserved.
+# Proprietary and Confidential.
+#
+# Unauthorized reproduction, copying, modification, distribution,
+# redistribution, publication, reverse engineering, decompilation, or
+# disassembly of this file, in whole or in part, via any medium, is
+# strictly prohibited without explicit prior written authorization.
 
 # ===== APEX elevation preamble :: Hardened, observable, idempotent, safely-concurrent automation: bash scripts pass shellcheck clean under strict mode with trapped error/cleanup, full CLI ergonomics, structured logging, dependency preflight, single-instance locking, and disciplined exit codes; Python scripts use argparse + logging + type hints + pathlib + list-form subprocess + context managers + narrow exception handling + explicit exit codes. This is the fallback "make any ordinary script production-grade" domain. =====
 # >>> APEX[DT-BASH-STRICT-HEADER] Canonical strict-mode bash header: portable shebang via env, capital -E so traps inherit into functions/subshells, errexit/nounset/pipefail, and program metadata. IFS is left alone and nothing is readonly, so the script's own word splitting and variables (VERSION, PROG, ...) keep working. Paste directly under any new or hardened bash script. >>>
@@ -121,6 +127,8 @@ safe_rm(){
 # <<< APEX[DT-BASH-DESTRUCTIVE-GUARD] <<<
 # ===== end APEX preamble =====
 
+
+# nightly backup
 SRC=/var/www
 DEST=/backups/www-$(date +%F).tar.gz
 tar czf $DEST $SRC
