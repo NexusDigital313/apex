@@ -246,6 +246,7 @@ class Runner:
                                (out.stderr or parsed.stderr).strip()[-200:])
             self._arch_install_cases(tmp)
             self._behaviour_cases(tmp)
+            self._forensic_file_cases(tmp)
             self._forensic_cases(tmp)
             self._cis_cases(tmp)
         finally:
@@ -410,6 +411,130 @@ for ((i = 1; i <= $#; i++)); do [ "${!i}" = --output ] && { j=$((i + 1)); echo s
 exit 0
 '''
 
+    def _forensic_file_cases(self, tmp: str) -> None:
+        """Run the elevated examples/acquire.sh end to end against a regular FILE as
+        the evidence source (no root or loop device needed), dc3dd/gpg/chattr stubbed."""
+        work = tempfile.mkdtemp(prefix="forensic-file.", dir=tmp)
+        bindir = os.path.join(work, "bin")
+        os.makedirs(bindir)
+        # chattr is a recorder: a real `chattr +a` (as root) would leave the custody
+        # logs undeletable and leak the temp dir
+        for name, body in (("dc3dd", self._DC3DD), ("gpg", self._GPG),
+                           ("chattr", '#!/bin/sh\necho "chattr $*" >> "$CALLS"\n'),
+                           ("dd", '#!/bin/bash\necho "dd $*" >> "$CALLS"\nexec /bin/dd "$@"\n')):
+            path = os.path.join(bindir, name)
+            with open(path, "w") as fh:
+                fh.write(body)
+            os.chmod(path, 0o755)
+        # a host without `hostname` (e.g. Arch base: it ships in inetutils)
+        nohost = os.path.join(work, "bin-nohost")
+        os.makedirs(nohost)
+        with open(os.path.join(nohost, "hostname"), "w") as fh:
+            fh.write('#!/bin/sh\necho "hostname: command not found" >&2\nexit 127\n')
+        os.chmod(os.path.join(nohost, "hostname"), 0o755)
+
+        acquire = open(os.path.join(EX_DIR, "acquire.sh"), encoding="utf-8").read()
+        f = _RUBRICS["forensic"]
+        variants = {
+            "plain": acquire,
+            # the script changes directory after starting; COC_LOG is relative
+            "cd": acquire.replace("dd if=$SRC", "mkdir -p ev; SRC=$PWD/$SRC; cd ev\ndd if=$SRC"),
+            # the script's own checksum file in BSD `--tag` format
+            "tag": acquire.replace("sha256sum $OUT >", "sha256sum --tag $OUT >"),
+        }
+        assert all(v != acquire for k, v in variants.items() if k != "plain")
+        scripts = {k: det.elevate(v, f, "shell").elevated for k, v in variants.items()}
+        data = os.urandom(3 << 20)
+
+        def run(case: str, script: str, args=("src.bin", "a.img"), path_extra=(), **extra):
+            ev = os.path.join(work, case)
+            os.makedirs(ev)
+            with open(os.path.join(ev, "src.bin"), "wb") as fh:
+                fh.write(data)
+            path = os.path.join(ev, "script.sh")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(scripts[script])
+            calls = os.path.join(ev, "calls")
+            open(calls, "w").close()
+            env = dict(os.environ, PATH=os.pathsep.join(list(path_extra) + [bindir, os.environ["PATH"]]),
+                       CALLS=calls, COC_LOG=os.path.join(ev, "coc.log"), EXAMINER="e", EXAMINER_ORG="o",
+                       EXAMINER_CREDS="c", EVIDENCE_ID="EV1", CASE_NUMBER="C1", LOCATION="l",
+                       PURPOSE="p", SOURCE_DESC="d", GPG_KEY="k")
+            env.update(extra)
+            p = subprocess.run(["bash", path] + list(args), cwd=ev, env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=60)
+            coc = os.path.join(ev, env["COC_LOG"])
+            log = open(coc, errors="replace").read() if os.path.exists(coc) else ""
+            return p, ev, open(calls).read(), log
+
+        def digest(path: str, algo: str) -> str:
+            return subprocess.run([algo + "sum", path], capture_output=True, text=True).stdout.split()[0]
+
+        def manifests_ok(d: str):
+            # --strict: a malformed line is a failure, not a warning
+            r = subprocess.run("sha256sum --strict -c *.SHA256SUMS && sha512sum --strict -c *.SHA512SUMS",
+                               shell=True, cwd=d, capture_output=True, text=True)
+            return r.returncode == 0 and r.stdout.count("a.img: OK") == 2, (r.stdout + r.stderr)[-300:]
+
+        # 1. happy path: one dc3dd read, verified image, sealed manifests that verify
+        p, ev, calls, coc = run("ok", "plain")
+        img = os.path.join(ev, "a.img")
+        image_ok = os.path.exists(img) and open(img, "rb").read() == data
+        self.check("forensic(file): acquire.sh exits 0, image == source",
+                   p.returncode == 0 and image_ok, p.stderr[-300:])
+        self.check("forensic(file): one dc3dd read, no bare dd",
+                   calls.count("dc3dd if=") == 1 and not re.search(r"^dd ", calls, re.MULTILINE), calls[-300:])
+        want = {a: digest(os.path.join(ev, "src.bin"), a) for a in ("sha256", "sha512")}
+        sums_ok = image_ok and all(
+            os.path.exists(img + "." + a) and open(img + "." + a).read().split()[0] == want[a]
+            for a in ("sha256", "sha512"))
+        self.check("forensic(file): .sha256/.sha512 hold the image digests", sums_ok)
+        ok, detail = manifests_ok(ev)
+        tars = [n for n in os.listdir(ev) if n.endswith(".tar")]
+        self.check("forensic(file): SHA256SUMS/SHA512SUMS verify", ok, detail)
+        self.check("forensic(file): .tar and .tar.asc exist",
+                   len(tars) == 1 and os.path.exists(os.path.join(ev, tars[0] + ".asc")), str(tars))
+        self.check("forensic(file): COC log has custody header and completion",
+                   "===== CHAIN OF CUSTODY =====" in coc and "ACQUISITION COMPLETE" in coc
+                   and "ABORT" not in coc, coc[-300:])
+
+        # 2. a hashlog that disagrees with the image is fatal and never sealed
+        p, ev, calls, coc = run("mismatch", "plain", CORRUPT="1")
+        self.check("forensic(file): tampered hash -> non-zero, MISMATCH, not sealed",
+                   p.returncode != 0 and "MISMATCH" in coc and "ACQUISITION COMPLETE" not in coc
+                   and not any(n.endswith(".tar") for n in os.listdir(ev)), coc[-300:])
+        self.check("forensic(file): mismatch is marked ABORT in the custody log",
+                   "ABORT" in coc, coc[-300:])
+
+        # 3. no arguments: set -u stops it before imaging, and the custody log says why
+        p, ev, calls, coc = run("noargs", "plain", args=())
+        self.check("forensic(file): no args -> non-zero, nothing imaged, ABORT logged",
+                   p.returncode != 0 and "dc3dd if=" not in calls and "ABORT" in coc, coc[-300:])
+
+        # 4. relative COC_LOG and a script that cd's: one custody log, and the sealed
+        #    copy carries the custody header
+        p, ev, calls, coc = run("cd", "cd", args=("src.bin", "a.img"), COC_LOG="coc.log")
+        sub = os.path.join(ev, "ev")
+        frozen = [n for n in os.listdir(sub) if n.endswith(".coc.log")] if os.path.isdir(sub) else []
+        sealed = open(os.path.join(sub, frozen[0]), errors="replace").read() if frozen else ""
+        self.check("forensic(file): relative COC_LOG survives the script's cd",
+                   p.returncode == 0 and not os.path.exists(os.path.join(sub, "coc.log"))
+                   and "CHAIN OF CUSTODY" in sealed and "VERIFY PASS" in sealed,
+                   p.stderr[-300:] + str(os.listdir(sub) if os.path.isdir(sub) else ""))
+
+        # 5. the script's own checksum file must not change what the seal records
+        p, ev, calls, coc = run("tag", "tag")
+        ok, detail = manifests_ok(ev)
+        man = "".join(open(os.path.join(ev, n)).read() for n in os.listdir(ev) if n.endswith(".SHA256SUMS"))
+        self.check("forensic(file): seal binds the verified digest, not the script's .sha256",
+                   p.returncode == 0 and ok and "{0}  a.img\n".format(want["sha256"]) in man, detail)
+
+        # 6. a missing `hostname` must not write a false ABORT into a good acquisition
+        p, ev, calls, coc = run("nohost", "plain", path_extra=(nohost,))
+        self.check("forensic(file): no hostname -> no false FATAL/ABORT",
+                   p.returncode == 0 and "ACQUISITION COMPLETE" in coc
+                   and "FATAL" not in coc and "ABORT" not in coc, coc[-300:])
+
     def _forensic_cases(self, tmp: str) -> None:
         """Run an elevated acquisition against a real (loop) block device with dc3dd
         and gpg stubbed: one verified read, sealed manifests, hard fail on mismatch."""
@@ -429,6 +554,7 @@ exit 0
             bindir = os.path.join(work, "bin")
             os.makedirs(bindir)
             for name, body in (("dc3dd", self._DC3DD), ("gpg", self._GPG),
+                               ("chattr", '#!/bin/sh\necho "chattr $*" >> "$CALLS"\n'),
                                ("dd", '#!/bin/bash\necho "dd $*" >> "$CALLS"\nexec /bin/dd "$@"\n')):
                 path = os.path.join(bindir, name)
                 with open(path, "w") as fh:
