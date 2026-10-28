@@ -10,8 +10,9 @@
 
 # APEX — elevate any script to its apex standard
 
-APEX takes an executable script, works out *what kind* of script it is, and rewrites it
-up to the highest known standard for that class:
+APEX takes an executable script, works out *what kind* of script it is, and elevates it
+to the highest known standard for that class — **fully offline, deterministically, with no
+API key and zero third-party dependencies.**
 
 | If it's…                         | APEX takes it to…                                                        |
 |----------------------------------|--------------------------------------------------------------------------|
@@ -20,39 +21,61 @@ up to the highest known standard for that class:
 | an **OS-install / provisioning** script | **fully unattended *or* interactive** — preflight, destroy-guards, kickstart/preseed/autoinstall/pacstrap/AutoYaST, LUKS, secure post-install |
 | **anything else**                | **production-grade** — strict mode, ERR/EXIT traps, logging, preflight, locking, CLI ergonomics |
 
-## How it works — two engines
+## How it works — one self-driving engine
 
-1. **Deterministic engine** (always on, zero dependencies, fully offline). Classifies the
-   script, then injects clearly-marked, idempotent blocks from the domain *rubric* — the
-   chain-of-custody header, the STIG hardening library, the installer preflight + TUI, etc.
-   Re-running is a no-op (every block is fenced with an `APEX[<id>]` marker). The output is
-   always syntax-checked (`bash -n` + `shellcheck`).
-2. **LLM engine** (when `ANTHROPIC_API_KEY` is set). The deterministically pre-hardened
-   script plus the full rubric go to **Claude Opus 4.8**, which does the intelligent,
-   behaviour-preserving rewrite — applying *every* automatable control, integrating rather
-   than appending, and returning a control-by-control changelog. If its output fails the
-   syntax gate, APEX falls back to the deterministic result.
+APEX has a single **deterministic, self-driving engine**. It:
 
-The "exponential logic" lives in `rubrics/*.json` — each rubric is the encoded definition of
-the apex standard for one domain (controls with real check/fix pairs + STIG IDs/CCIs,
-injectable shell, and the LLM's rewrite guidance). Edit the JSON to tune a standard; no code
-changes needed.
+1. **Classifies** the script (weighted signatures → a domain rubric).
+2. **Reads the script's own content** and, for each block in the rubric, decides whether the
+   script actually *needs* it — via a machine-evaluable `apply_when` gate (present/absent/
+   any-present regex conditions). This is what makes it "self-driving": the number and choice
+   of changes track the script in front of it, not a fixed constant. A raw script gets the
+   full treatment; a script that already has strict mode and traps gets only what it's missing.
+3. **Injects** only the needed blocks — clearly marked and idempotent. Every block is fenced
+   with an `APEX[<id>]` marker, and gates are evaluated against your *original* code (APEX's
+   own injected blocks are stripped before matching), so **re-running is a guaranteed no-op**.
+4. **Rewrites the script's own lines** toward the standard so the injected helpers are actually
+   *used*, not merely present — e.g. `rm -rf X` → `safe_rm X`, a forensic `dd if=SRC of=IMG` →
+   `acquire_image SRC IMG` (write-block, `dc3dd`, dual-hash verify), and legacy `` `…` `` →
+   `$(…)`. Rewrites are conservative and **fail safe**: they fire only on real code (a thin
+   lexer skips APEX blocks, heredoc bodies, quoted strings and comments), decline anything
+   ambiguous (multi-target / glob / command-substitution), and every rewrite is parsed as part
+   of the whole script and **rolled back** if it would break it.
+5. **Validates** the result (`bash -n` / `shellcheck` / `py_compile`) before writing.
+
+Every run prints a **decision trace** — exactly what APEX detected and why it applied, rewrote
+or skipped each rule — and writes the same trace into the report:
+
+```
+  scanned 8 rubric block(s):
+    ＋ DT-BASH-STRICT-HEADER      missing `set -euo pipefail`
+    ＋ DT-BASH-LOG-TRAP-SCAFFOLD  missing `trap ... (ERR|EXIT)`
+    ＋ DT-BASH-ARGPARSE-SKELETON  missing `getopts`
+    ＋ DT-BASH-DESTRUCTIVE-GUARD  uses `rm -rf`; missing `safe_rm()`
+    ↻ RW-BASH-RM-SAFE            1 site(s): route single-target `rm -rf` through safe_rm()
+    ↻ RW-BASH-BACKTICKS          1 site(s): modernise `…` to $(…)
+    － DT-BASH-CURL-HARDENING     no matching trigger pattern present
+  done: 4 change(s), 2 rewrite(s), 4 block(s) not needed, engine=deterministic (self-driving)
+```
+
+The standards live in `rubrics/*.json` — each rubric is the encoded definition of the apex
+standard for one domain (controls with real check/fix pairs + STIG IDs/CCIs, injectable shell
+blocks and in-place rewrite rules, each carrying an `apply_when` gate). Edit the JSON to tune a
+standard or add a new content-triggered block or rewrite; no code changes needed.
 
 ## Quick start
 
 ```bash
-cd ~/Projects/apex
+cd ~/Downloads/apex          # no install step, no dependencies — Python 3.8+ stdlib only
 
 # what would it do?
 python3 apex.py check examples/acquire.sh
 
-# elevate it (offline, deterministic) -> writes acquire.apex.sh + acquire.apex.report.md
+# elevate it -> writes acquire.apex.sh + acquire.apex.report.md
 python3 apex.py elevate examples/acquire.sh
 
-# elevate with the intelligent rewrite (needs the SDK + key)
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...
-python3 apex.py elevate examples/cis-baseline.sh --mode llm --diff
+# see the change trace + a unified diff, write nothing
+python3 apex.py elevate examples/cis-baseline.sh --stdout --diff
 ```
 
 ## Commands
@@ -67,20 +90,18 @@ apex list                        list domains and their apex standards
 
 | flag | meaning |
 |---|---|
-| `--mode auto` (default) | use the LLM if `ANTHROPIC_API_KEY` is set, else deterministic |
-| `--mode deterministic`  | offline rule engine only |
-| `--mode llm`            | deterministic pre-pass, then Claude rewrite |
-| `-o <path>`             | output path (default `<name>.apex.<ext>`) |
-| `--report <path>`       | report path (`-` to skip) |
-| `--in-place`            | overwrite the input (keeps `<name>.apex.bak`) |
-| `--stdout`              | print elevated script to stdout (status goes to stderr) |
-| `--diff`                | also print a unified diff |
+| `-o <path>`       | output path (default `<name>.apex.<ext>`) |
+| `--report <path>` | report path (`-` to skip) |
+| `--in-place`      | overwrite the input (keeps `<name>.apex.bak`) |
+| `--stdout`        | print elevated script to stdout (status + trace go to stderr) |
+| `--diff`          | also print a unified diff |
 
 ## What you get
 
-- the **elevated script** (executable, syntax-validated)
-- an **elevation report** (`*.report.md`) — detected domain, target standard, every control
-  applied (with rationale), residual risks, manual follow-ups, and the rubric's references
+- the **elevated script** (executable, syntax-validated — output that fails validation is never written)
+- an **elevation report** (`*.report.md`) — detected domain, target standard, the
+  self-driving decision trace (applied / rewritten / already-present / not-needed / declined,
+  with the reason for each), the full rubric control table, and references
 
 ## Layout
 
@@ -88,15 +109,16 @@ apex list                        list domains and their apex standards
 apex.py                 entrypoint
 apex/
   classify.py           weighted-signature domain classifier (+ rubrics/classifier.json)
-  rubrics.py            rubric model + loader
-  engine_deterministic.py   safe, idempotent, offline injection pass
-  engine_llm.py         Claude Opus 4.8 intelligent rewrite (output_config JSON contract, cached rubric, streamed)
+  rubrics.py            rubric + transform + rewrite model with the apply_when self-driving gate
+  engine_deterministic.py   two-pass engine: block injection + in-place rewrite (lexer + rollback)
   validate.py           bash -n / shellcheck / py_compile syntax gate
-  report.py             elevation report + unified diff
+  report.py             elevation report + decision trace + unified diff
+  banner.py             the startup banner
   cli.py                orchestration
 rubrics/*.json          the encoded apex standards (CIS->STIG, forensic, installer, generic)
 examples/*.sh           sample before-scripts
+tests/run.py            invariant harness: golden + idempotency + validity + rewrite-safety
 ```
 
-> Deterministic mode targets shell. For Python scripts, run with `ANTHROPIC_API_KEY` set so
-> the LLM engine handles the rewrite.
+> The deterministic engine targets shell for block injection and rewrites. For other languages
+> APEX still classifies the script and reports the applicable control rubric, but makes no edits.

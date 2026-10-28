@@ -30,18 +30,18 @@ def unified_diff(original: str, elevated: str, path: str = "script") -> str:
 def build_report(
     classification: ClassificationResult,
     rubric: Rubric,
-    mode: str,
+    engine: str,
     applied_transforms: List[str],
-    changelog: Optional[List[Dict]] = None,
-    residual_risks: Optional[List[str]] = None,
-    manual_followups: Optional[List[str]] = None,
+    rewritten_rewrites: Optional[List[str]] = None,
+    decisions: Optional[List] = None,
     validation_tool: str = "",
     validation_warnings: Optional[List[str]] = None,
 ) -> str:
-    changelog = changelog or []
-    residual_risks = residual_risks or []
-    manual_followups = manual_followups or []
+    decisions = decisions or []
+    rewritten_rewrites = rewritten_rewrites or []
     validation_warnings = validation_warnings or []
+    tmap = {t.id: t for t in rubric.transforms}
+    rmap = {r.id: r for r in rubric.rewrites}
 
     out: List[str] = []
     out.append("# APEX Elevation Report")
@@ -51,7 +51,7 @@ def build_report(
     out.append("| Detected domain | `{0}` (confidence {1}) |".format(
         classification.domain, classification.confidence))
     out.append("| Target standard | **{0}** |".format(rubric.target_standard))
-    out.append("| Engine | {0} |".format(mode))
+    out.append("| Engine | {0} |".format(engine))
     out.append("| Language | {0} |".format(classification.language))
     out.append("| Controls in rubric | {0} ({1} automatable) |".format(
         len(rubric.controls), len(rubric.automatable_controls)))
@@ -62,24 +62,33 @@ def build_report(
 
     out.append("## What was elevated")
     out.append("")
-    if changelog:
-        ctrl_by_id = {c.id: c for c in rubric.controls}
-        for entry in changelog:
-            cid = entry.get("control_id", "")
-            ctrl = ctrl_by_id.get(cid)
-            title = ctrl.title if ctrl else cid
-            out.append("- **[{0}] {1}** — {2}".format(cid, title, entry.get("what_changed", "")))
-            if entry.get("rationale"):
-                out.append("  - _why:_ {0}".format(entry["rationale"]))
-    elif applied_transforms:
-        tmap = {t.id: t for t in rubric.transforms}
+    if applied_transforms:
         for tid in applied_transforms:
             t = tmap.get(tid)
             desc = t.description if t else tid
-            out.append("- **{0}** — {1}".format(tid, desc))
-    else:
-        out.append("_No changes applied (already at standard, or nothing to do)._")
+            out.append("- **{0}** — {1} _(block injected)_".format(tid, desc))
+    if rewritten_rewrites:
+        for rid in rewritten_rewrites:
+            rw = rmap.get(rid)
+            desc = rw.description if rw else rid
+            out.append("- **{0}** — {1} _(code rewritten in place)_".format(rid, desc))
+    if not applied_transforms and not rewritten_rewrites:
+        out.append("_No changes (already at standard for this domain, or nothing applicable)._")
     out.append("")
+
+    # The self-driving decision trace: exactly what APEX detected and why it
+    # applied or skipped each block. This is the "it read my script" evidence.
+    if decisions:
+        out.append("## Self-driving decision trace")
+        out.append("")
+        out.append("| Transform | Verdict | Reason |")
+        out.append("|---|---|---|")
+        icon = {"applied": "✅ applied", "rewritten": "🔁 rewritten", "already-present": "⏭ already present",
+                "not-needed": "➖ not needed", "declined": "🚫 declined"}
+        for d in decisions:
+            out.append("| `{0}` | {1} | {2} |".format(
+                d.id, icon.get(d.verdict, d.verdict), d.reason))
+        out.append("")
 
     out.append("## Controls covered by the rubric")
     out.append("")
@@ -90,23 +99,12 @@ def build_report(
             c.id, c.severity, "yes" if c.automatable else "manual", c.title))
     out.append("")
 
-    if residual_risks:
-        out.append("## Residual risks")
-        out.append("")
-        for r in residual_risks:
-            out.append("- {0}".format(r))
-        out.append("")
-
-    if manual_followups:
-        out.append("## Manual follow-ups (cannot be automated)")
-        out.append("")
-        for m in manual_followups:
-            out.append("- [ ] {0}".format(m))
-        out.append("")
-
     out.append("## Validation")
     out.append("")
-    out.append("- syntax: **checked**{0}".format(" via {0}".format(validation_tool) if validation_tool else ""))
+    if validation_tool:
+        out.append("- syntax: **checked** via {0}".format(validation_tool))
+    else:
+        out.append("- syntax: **not checked** (no checker available)")
     if validation_warnings:
         out.append("- linter notes ({0}):".format(len(validation_warnings)))
         for w in validation_warnings[:15]:

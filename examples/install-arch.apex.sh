@@ -7,31 +7,34 @@
 # disassembly of this file, in whole or in part, via any medium, is
 # strictly prohibited without explicit prior written authorization.
 
-
 # ===== APEX elevation preamble :: Production-grade automated/interactive OS provisioning: Kickstart (RHEL/Fedora/Rocky/Alma), Debian preseed + Ubuntu Subiquity autoinstall/cloud-init, Arch pacstrap installer, SUSE AutoYaST, generic cloud-init; aligned to vendor reference docs, CIS-style secure post-install, and reproducible-config / dry-run / fail-closed automation discipline. =====
 # >>> APEX[FLAG_PLUMBING] Resolve mode and the --assume-yes/--interactive/--dry-run/--family flags into single variables, with mutual-exclusion errors, TTY auto-detect, and a documented exit-code table. Satisfies PROV-001, PROV-006, PROV-012, PROV-024. >>>
 set -Eeuo pipefail
 # Exit codes: 0 ok | 2 usage | 3 preflight | 4 user-abort | 5 validation | 6 destroy-guard | 10 install-fail
-MODE="" ; ASSUME_YES=0 ; DRY_RUN=0 ; FAMILY="${FAMILY:-auto}" ; CONFIG=""
+MODE="" ; ASSUME_YES="${ASSUME_YES:-0}" ; DRY_RUN="${DRY_RUN:-0}" ; REST=() ; FAMILY="${FAMILY:-auto}" ; CONFIG=""
 ERR_USAGE=2; ERR_PREFLIGHT=3; ERR_ABORT=4; ERR_VALIDATE=5; ERR_DESTROY=6; ERR_INSTALL=10
 usage(){ cat <<EOF
 Usage: $0 [--interactive|--unattended] [--assume-yes] [--dry-run] --family <rhel|debian|ubuntu|arch|suse|cloud-init|auto> [--config FILE]
-Env: INSTALL_MODE=interactive|unattended  ASSUME_YES=1  DRY_RUN=1  FAMILY=...
+Env: INSTALL_MODE=interactive|unattended  ASSUME_YES=1  DRY_RUN=1  FAMILY=...  TARGET_HOSTNAME=name
 Exit: 0 ok 2 usage 3 preflight 4 abort 5 validation 6 destroy-guard 10 install-fail
 EOF
 }
 while [ $# -gt 0 ]; do case "$1" in
   --interactive) MODE=interactive;; --unattended) MODE=unattended;;
   --assume-yes|--yes|-y) ASSUME_YES=1;; --dry-run|--check) DRY_RUN=1;;
-  --family) FAMILY="$2"; shift;; --config) CONFIG="$2"; shift;;
-  -h|--help) usage; exit 0;; *) echo "unknown arg: $1" >&2; usage; exit "$ERR_USAGE";;
+  --family) FAMILY="${2:?--family needs a value}"; shift;; --config) CONFIG="${2:?--config needs a value}"; shift;;
+  -h|--help) usage; exit 0;; --) shift; REST+=("$@"); break;; *) REST+=("$1");;
 esac; shift; done
+# anything APEX does not own is handed back to the script's own argument handling
+set -- ${REST[@]+"${REST[@]}"}
 [ -z "$MODE" ] && MODE="${INSTALL_MODE:-}"
 # auto-detect mode from TTY when unset
 if [ -z "$MODE" ]; then if [ -t 0 ] && [ -t 1 ]; then MODE=interactive; else MODE=unattended; fi; fi
 # conflict + safety guards
 if [ "$MODE" = interactive ] && [ "$ASSUME_YES" = 1 ]; then echo "--interactive conflicts with --assume-yes" >&2; exit "$ERR_USAGE"; fi
-if [ "$MODE" = unattended ] && [ "$ASSUME_YES" != 1 ] && [ "$DRY_RUN" != 1 ]; then echo "unattended mode requires --assume-yes (or --dry-run)" >&2; exit "$ERR_USAGE"; fi
+# --dry-run is not approval: it only covers commands routed through run(), not the script's own
+if [ "$MODE" = unattended ] && [ "$ASSUME_YES" != 1 ]; then echo "unattended mode requires --assume-yes" >&2; exit "$ERR_USAGE"; fi
+if [ "$DRY_RUN" = 1 ]; then echo "note: --dry-run simulates only commands routed through run(); anything else still runs" >&2; fi
 # <<< APEX[FLAG_PLUMBING] <<<
 
 # >>> APEX[LOGGING] Timestamped/leveled log helpers teed to a persistent file, a die() that exits with a code, and an ERR/EXIT trap that reports the failing line and runs ordered cleanup (reverse unmount + crypt close). Satisfies PROV-011, PROV-012. >>>
@@ -81,6 +84,8 @@ verify_artifact(){ # $1=url $2=expected_sha256 $3=out [$4=sig_url $5=gpg_keyring
 # <<< APEX[VERIFY_ARTIFACT] <<<
 
 # >>> APEX[RESOLVE_TARGET_DISK] Enumerate candidate disks, subtract the running-root disk, live medium, and any disk with mounted partitions / LVM-MD-crypt holders; expose a safe candidate list for the picker and validate an unattended TARGET_DISK against the exclusion set. Satisfies PROV-003. >>>
+# partition N of a disk: /dev/sda -> /dev/sda2; /dev/nvme0n1, /dev/mmcblk0 -> ...p2
+part_dev(){ case "$1" in *[0-9]) printf '%sp%s\n' "$1" "$2";; *) printf '%s%s\n' "$1" "$2";; esac; }
 root_disk(){ local src pk; src=$(findmnt -no SOURCE / 2>/dev/null); pk=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1); [ -n "$pk" ] && echo "/dev/$pk"; }
 candidate_disks(){ local rd; rd=$(root_disk)
   lsblk -dnpo NAME,TYPE | awk '$2=="disk"{print $1}' | while read -r d; do
@@ -106,7 +111,7 @@ confirm_destroy(){ local dev="$1"; [ -n "$dev" ] || die "confirm_destroy: empty 
 # <<< APEX[CONFIRM_DESTROY_GUARD] <<<
 
 # >>> APEX[WHIPTAIL_MENU_SKELETON] Reusable whiptail TUI helpers (menu/input/password/yesno) with a disk picker fed from candidate_disks, per-field validation loops, and a final plan-review screen that triggers confirm_destroy. dialog fallback. Satisfies PROV-023, PROV-015. >>>
-TUI=${TUI:-whiptail}; command -v whiptail >/dev/null || TUI=dialog; command -v "$TUI" >/dev/null || die "no whiptail/dialog for interactive mode" "$ERR_USAGE"
+TUI=${TUI:-whiptail}; command -v whiptail >/dev/null || TUI=dialog; [ "${MODE:-}" != interactive ] || command -v "$TUI" >/dev/null || die "no whiptail/dialog for interactive mode" "$ERR_USAGE"
 tui_input(){ local t="$1" p="$2" def="$3" v; v=$($TUI --title "$t" --inputbox "$p" 10 70 "$def" 3>&1 1>&2 2>&3) || exit "$ERR_ABORT"; printf '%s' "$v"; }
 tui_pass(){ local t="$1" v; v=$($TUI --title "$t" --passwordbox "$2" 10 70 3>&1 1>&2 2>&3) || exit "$ERR_ABORT"; printf '%s' "$v"; }
 tui_yesno(){ $TUI --title "$1" --yesno "$2" 18 72; }
@@ -114,7 +119,7 @@ pick_disk(){ local opts=(); while read -r d; do opts+=("$d" "$(lsblk -dno SIZE,M
   [ "${#opts[@]}" -gt 0 ] || die "no selectable disks" "$ERR_PREFLIGHT"
   $TUI --title 'Target disk' --menu 'Choose install disk (DESTROYED):' 20 76 8 "${opts[@]}" 3>&1 1>&2 2>&3 || exit "$ERR_ABORT"; }
 prompt_until_valid(){ local title="$1" prompt="$2" def="$3" validator="$4" v
-  while :; do v=$(tui_input "$title" "$prompt" "$def"); if "$validator" "$v"; then printf '%s' "$v"; return; fi; $TUI --msgbox "Invalid: $v" 8 50; done; }
+  while :; do v=$(tui_input "$title" "$prompt" "$def") || exit "$ERR_ABORT"; if "$validator" "$v"; then printf '%s' "$v"; return; fi; $TUI --msgbox "Invalid: $v" 8 50; done; }
 review_and_confirm(){ tui_yesno 'Confirm plan' "$1" || exit "$ERR_ABORT"; confirm_destroy "$TARGET_DISK"; }
 # <<< APEX[WHIPTAIL_MENU_SKELETON] <<<
 
@@ -135,13 +140,14 @@ luks_lvm_setup(){ local disk="$1" vg="${2:-vg0}"
   confirm_destroy "$disk"
   run wipefs -a "$disk"; run sgdisk --zap-all "$disk"
   if [ "$FIRMWARE" = uefi ]; then run sgdisk -n1:0:+512M -t1:ef00 -c1:ESP "$disk"; run sgdisk -n2:0:0 -t2:8309 -c2:crypt "$disk"; else run sgdisk -n1:0:+1M -t1:ef02 "$disk"; run sgdisk -n2:0:+512M "$disk"; run sgdisk -n3:0:0 -t3:8309 "$disk"; fi
-  local cryptpart; cryptpart=$(lsblk -nrpo NAME "$disk" | grep -E 'crypt$|p?3$|p?2$' | tail -1)
-  printf '%s' "$pass" | run cryptsetup luksFormat --type luks2 "$cryptpart" -
+  run udevadm settle
+  local cryptpart; if [ "$FIRMWARE" = uefi ]; then cryptpart=$(part_dev "$disk" 2); else cryptpart=$(part_dev "$disk" 3); fi
+  printf '%s' "$pass" | run cryptsetup luksFormat --batch-mode --type luks2 "$cryptpart" -
   printf '%s' "$pass" | run cryptsetup open "$cryptpart" cryptlvm -
   run pvcreate /dev/mapper/cryptlvm; run vgcreate "$vg" /dev/mapper/cryptlvm
   run lvcreate -L 4G -n swap "$vg"; run lvcreate -l 100%FREE -n root "$vg"
   run mkfs.ext4 "/dev/$vg/root"; run mkswap "/dev/$vg/swap"
-  CRYPTS+=(cryptlvm); unset pass p1 p2 2>/dev/null || true; export CRYPT_PART="$cryptpart"; }
+  [ "${DRY_RUN:-0}" = 1 ] || CRYPTS+=(cryptlvm); unset pass p1 p2 2>/dev/null || true; export CRYPT_PART="$cryptpart"; }
 # <<< APEX[LUKS_PARTITION_FLOW] <<<
 
 # >>> APEX[VALIDATE_CONFIG] Family-dispatched generated-config validator that fails closed before apply. Satisfies PROV-007. >>>
@@ -162,7 +168,7 @@ text
 lang en_US.UTF-8
 keyboard us
 timezone ${TZ:-UTC} --utc
-network --bootproto=dhcp --hostname=${HOSTNAME:?} --activate
+network --bootproto=dhcp --hostname=${TARGET_HOSTNAME:?} --activate
 rootpw --iscrypted $(openssl passwd -6 "${ROOT_PW:?}")
 user --name=${USERNAME:?} --groups=wheel --iscrypted --password=$(openssl passwd -6 "${USER_PW:?}")
 sshkey --username=${USERNAME} "${SSH_PUBKEY:?}"
@@ -207,7 +213,7 @@ autoinstall:
   locale: en_US.UTF-8
   keyboard: {layout: us}
   identity:
-    hostname: ${HOSTNAME:?}
+    hostname: ${TARGET_HOSTNAME:?}
     username: ${USERNAME:?}
     password: "$(openssl passwd -6 "${USER_PW:?}")"
   ssh:
@@ -232,7 +238,7 @@ gen_preseed(){ local out="$1"; local recipe='partman-auto-lvm/new_vg_name string
   cat > "$out" <<EOF
 d-i debian-installer/locale string en_US.UTF-8
 d-i keyboard-configuration/xkb-keymap select us
-d-i netcfg/get_hostname string ${HOSTNAME:?}
+d-i netcfg/get_hostname string ${TARGET_HOSTNAME:?}
 d-i mirror/http/hostname string deb.debian.org
 d-i mirror/http/directory string /debian
 d-i passwd/root-password-crypted password $(openssl passwd -6 "${ROOT_PW:?}")
@@ -255,30 +261,44 @@ EOF
 
 # >>> APEX[ARCH_INSTALLER_SCAFFOLD] Ordered Arch installer: partition/luks/lvm/mkfs/mount -> pacstrap -> genfstab -> arch-chroot config (timezone/locale/hostname/initramfs HOOKS/bootloader/user/ssh/secure hook), with verified keyring/mirrors and reverse-order teardown via the EXIT trap. Satisfies PROV-020, PROV-016, PROV-010, PROV-005. >>>
 install_arch(){ local disk="${TARGET_DISK:?}" vg=vg0
-  retry 3 pacman -Sy --noconfirm archlinux-keyring
+  retry 3 run pacman -Sy --noconfirm archlinux-keyring
   if [ "${ENCRYPT:-0}" = 1 ]; then luks_lvm_setup "$disk" "$vg"; else confirm_destroy "$disk"; run wipefs -a "$disk"; run sgdisk --zap-all "$disk"
     [ "$FIRMWARE" = uefi ] && { run sgdisk -n1:0:+512M -t1:ef00 "$disk"; run sgdisk -n2:0:0 "$disk"; } || { run sgdisk -n1:0:+1M -t1:ef02 "$disk"; run sgdisk -n2:0:0 "$disk"; }
-    run pvcreate "${disk}2"; run vgcreate "$vg" "${disk}2"; run lvcreate -L4G -nswap "$vg"; run lvcreate -l100%FREE -nroot "$vg"; run mkfs.ext4 "/dev/$vg/root"; run mkswap "/dev/$vg/swap"; fi
-  run mount "/dev/$vg/root" /mnt; MOUNTS+=(/mnt); run mkdir -p /mnt/boot
-  local esp; esp=$(lsblk -nrpo NAME,PARTTYPE "$disk" | awk '/ef00|ef02/{print $1; exit}'); [ "$FIRMWARE" = uefi ] && { run mkfs.fat -F32 "$esp"; run mount "$esp" /mnt/boot; }
+    run udevadm settle; local lvpart; lvpart=$(part_dev "$disk" 2)
+    run pvcreate "$lvpart"; run vgcreate "$vg" "$lvpart"; run lvcreate -L4G -nswap "$vg"; run lvcreate -l100%FREE -nroot "$vg"; run mkfs.ext4 "/dev/$vg/root"; run mkswap "/dev/$vg/swap"; fi
+  run mount "/dev/$vg/root" /mnt; [ "${DRY_RUN:-0}" = 1 ] || MOUNTS+=(/mnt); run mkdir -p /mnt/boot
+  # /boot: the ESP (partition 1) on UEFI; on encrypted BIOS installs the plain
+  # 512M partition 2, because GRUB cannot read a kernel inside the LUKS volume
+  if [ "$FIRMWARE" = uefi ]; then local esp; esp=$(part_dev "$disk" 1); run mkfs.fat -F32 "$esp"; run mount "$esp" /mnt/boot
+  elif [ "${ENCRYPT:-0}" = 1 ]; then local bootp; bootp=$(part_dev "$disk" 2); run mkfs.ext4 -F "$bootp"; run mount "$bootp" /mnt/boot; fi
   run swapon "/dev/$vg/swap"
-  retry 3 pacstrap -K /mnt base linux linux-firmware lvm2 openssh ufw fail2ban sudo grub $([ "$FIRMWARE" = uefi ] && echo efibootmgr)
-  genfstab -U /mnt >> /mnt/etc/fstab
+  retry 3 run pacstrap -K /mnt base linux linux-firmware lvm2 openssh ufw fail2ban sudo grub $([ "$FIRMWARE" = uefi ] && echo efibootmgr)
   local hooks='base udev autodetect modconf kms keyboard keymap consolefont block'
   [ "${ENCRYPT:-0}" = 1 ] && hooks="$hooks encrypt lvm2 filesystems fsck" || hooks="$hooks lvm2 filesystems fsck"
+  if [ "${DRY_RUN:-0}" = 1 ]; then log "DRY-RUN: genfstab -U /mnt >> /mnt/etc/fstab; arch-chroot /mnt (timezone, locale, hostname, initramfs, user, ssh, firewall, bootloader)" DEBUG
+    log 'arch install dry run complete'; return 0; fi
+  genfstab -U /mnt >> /mnt/etc/fstab
+  # GRUB commands are built here, on the host, and passed into the chroot as plain
+  # text: a quoted $(...) inside the heredoc is a bash syntax error at run time.
+  local grub_install grub_cmdline=''
+  if [ "$FIRMWARE" = uefi ]; then grub_install='grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH'; else grub_install="grub-install --target=i386-pc $disk"; fi
+  if [ "${ENCRYPT:-0}" = 1 ]; then local crypt_uuid; crypt_uuid=$(blkid -s UUID -o value "${CRYPT_PART:?}")
+    grub_cmdline="sed -i 's#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=${crypt_uuid}:cryptlvm root=/dev/${vg}/root\"#' /etc/default/grub"; fi
+  # hash on the host via stdin, so the password never shows in the process list
+  local pw_hash; pw_hash=$(printf '%s' "${USER_PW:?}" | openssl passwd -6 -stdin)
   arch-chroot /mnt /bin/bash -euo pipefail <<CHROOT
 ln -sf /usr/share/zoneinfo/${TZ:-UTC} /etc/localtime; hwclock --systohc
 sed -i 's/^#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen; locale-gen; echo 'LANG=en_US.UTF-8' > /etc/locale.conf
-echo '${HOSTNAME:?}' > /etc/hostname
+echo '${TARGET_HOSTNAME:?}' > /etc/hostname
 sed -i 's/^HOOKS=.*/HOOKS=($hooks)/' /etc/mkinitcpio.conf; mkinitcpio -P
-useradd -m -G wheel -s /bin/bash ${USERNAME:?}; echo '${USERNAME}:$(openssl passwd -6 "${USER_PW:?}")' | chpasswd -e
+useradd -m -G wheel -s /bin/bash ${USERNAME:?}; echo '${USERNAME}:${pw_hash}' | chpasswd -e
 mkdir -p /home/${USERNAME}/.ssh; echo '${SSH_PUBKEY:?}' > /home/${USERNAME}/.ssh/authorized_keys; chown -R ${USERNAME}:${USERNAME} /home/${USERNAME}/.ssh; chmod 700 /home/${USERNAME}/.ssh; chmod 600 /home/${USERNAME}/.ssh/authorized_keys
 echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/;s/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 systemctl enable sshd fail2ban
 ufw --force enable; ufw allow OpenSSH; systemctl enable ufw
-$([ "$FIRMWARE" = uefi ] && echo 'grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=ARCH' || echo "grub-install --target=i386-pc $disk")
-$([ "${ENCRYPT:-0}" = 1 ] && echo "sed -i 's#^GRUB_CMDLINE_LINUX=.*#GRUB_CMDLINE_LINUX=\\"cryptdevice=UUID=\$(blkid -s UUID -o value $CRYPT_PART):cryptlvm root=/dev/$vg/root\\"#' /etc/default/grub")
+$grub_install
+$grub_cmdline
 grub-mkconfig -o /boot/grub/grub.cfg
 echo provisioned > /etc/provision-stamp
 CHROOT
@@ -292,7 +312,7 @@ gen_autoyast(){ local out="$1"
 <!DOCTYPE profile>
 <profile xmlns="http://www.suse.com/1.0/yast2ns" xmlns:config="http://www.suse.com/1.0/configns">
   <general><mode><confirm config:type="boolean">false</confirm></mode></general>
-  <networking><dns><hostname>${HOSTNAME:?}</hostname></dns></networking>
+  <networking><dns><hostname>${TARGET_HOSTNAME:?}</hostname></dns></networking>
   <partitioning config:type="list"><drive>
     <device>${TARGET_DISK:?}</device><use>all</use>
     <enable_snapshots config:type="boolean">true</enable_snapshots>
@@ -320,7 +340,7 @@ EOF
 gen_cloudinit(){ local dir="$1"; mkdir -p "$dir"
   cat > "$dir/user-data" <<EOF
 #cloud-config
-hostname: ${HOSTNAME:?}
+hostname: ${TARGET_HOSTNAME:?}
 ssh_pwauth: false
 users:
   - name: ${USERNAME:?}
@@ -337,15 +357,15 @@ runcmd:
   - [systemctl, enable, --now, fail2ban]
   - [bash, -c, 'echo provisioned > /etc/provision-stamp']
 EOF
-  printf 'instance-id: %s\nlocal-hostname: %s\n' "${HOSTNAME}-$(date +%s)" "${HOSTNAME}" > "$dir/meta-data"
+  printf 'instance-id: %s\nlocal-hostname: %s\n' "${TARGET_HOSTNAME}-$(date +%s)" "${TARGET_HOSTNAME}" > "$dir/meta-data"
   validate_config cloud-init "$dir/user-data"
-  command -v genisoimage >/dev/null && run genisoimage -output "$dir/seed.iso" -volid cidata -joliet -rock "$dir/user-data" "$dir/meta-data"; }
+  if command -v genisoimage >/dev/null; then run genisoimage -output "$dir/seed.iso" -volid cidata -joliet -rock "$dir/user-data" "$dir/meta-data"; fi; }
 # <<< APEX[CLOUDINIT_SCAFFOLD] <<<
 
 # >>> APEX[REPRODUCIBILITY_STAMP] Centralize inputs in one sourced config, normalize nondeterministic fields, and emit a config hash for diff-review and provenance. Satisfies PROV-014, PROV-024. >>>
 load_config(){ [ -n "${CONFIG:-}" ] && [ -f "$CONFIG" ] && . "$CONFIG"
-  : "${HOSTNAME:?}" "${USERNAME:?}" "${TZ:=UTC}" "${TARGET_DISK:?}" "${SSH_PUBKEY:?}"
-  validate_hostname "$HOSTNAME" || die "bad hostname" "$ERR_VALIDATE"
+  : "${TARGET_HOSTNAME:?}" "${USERNAME:?}" "${TZ:=UTC}" "${TARGET_DISK:?}" "${SSH_PUBKEY:?}"
+  validate_hostname "$TARGET_HOSTNAME" || die "bad hostname" "$ERR_VALIDATE"
   validate_username "$USERNAME" || die "bad username" "$ERR_VALIDATE"
   validate_timezone "$TZ" || die "bad timezone" "$ERR_VALIDATE"
   [ "$MODE" = unattended ] && validate_target "$TARGET_DISK"
@@ -353,6 +373,7 @@ load_config(){ [ -n "${CONFIG:-}" ] && [ -f "$CONFIG" ] && . "$CONFIG"
   CONFIG_SHA=$(sha256sum "${CONFIG:-/dev/null}" 2>/dev/null | cut -d' ' -f1); export CONFIG_SHA; log "config sha=$CONFIG_SHA"; }
 # <<< APEX[REPRODUCIBILITY_STAMP] <<<
 # ===== end APEX preamble =====
+
 
 # automate arch install
 DISK=/dev/sda
